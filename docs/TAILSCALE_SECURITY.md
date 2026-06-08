@@ -4,50 +4,39 @@ This document outlines best practices for securing your MCP server when exposing
 
 ## Overview
 
-When using Tailscale Funnel to expose your local MCP server to Claude.ai, you're creating a public HTTPS endpoint. While this enables powerful Claude.ai integration, it also increases your attack surface. This guide covers how to minimize risks using Tailscale's built-in security features.
+When using Tailscale Funnel to expose your local MCP server to Claude.ai, you're creating a public HTTPS endpoint. While this enables powerful Claude.ai integration, it also increases your attack surface. This guide covers how to minimize risks.
+
+## ⚠️ Errata (2026-06): Tailscale ACLs do NOT filter Funnel ingress
+
+Earlier revisions of this document recommended using tailnet ACL `srcIPs`
+rules to restrict who can reach a Funnel endpoint from the public internet.
+**This does not work.** Funnel traffic is relayed from Tailscale's public
+relay servers to your device; tailnet ACLs only govern device-to-device
+traffic inside the tailnet. Funnel ingress bypasses ACLs entirely. The
+feature to filter Funnel by client IP / ASN is an open request:
+[tailscale/tailscale #13809](https://github.com/tailscale/tailscale/issues/13809)
+(open, no Tailscale staff response as of 2026-06).
+
+**Defence-in-depth for Funnel-exposed MCP servers must happen at the
+application layer.** This server provides two options:
+
+1. **OAuth 2.1 shim** (recommended for Claude.ai web/mobile).
+   See [OAUTH_SHIM.md](./OAUTH_SHIM.md). Set `MCP_AUTH_MODE=oauth`.
+2. **Legacy `?api_key=` query auth** (default). Useful for stdio / local /
+   ChatGPT layer, but Claude.ai web does NOT pass `?api_key=` and will fail
+   against this mode.
 
 ## Security Strategies
 
-### 1. Tailscale Access Control Lists (ACLs)
+### 1. Application-layer authentication
 
-Configure Tailscale ACLs to restrict funnel access to specific IP ranges or sources.
+Choose `MCP_AUTH_MODE`:
+- `oauth` — runs the built-in OAuth 2.1 + DCR + PKCE shim. Required for
+  Claude.ai web / mobile custom connectors.
+- `legacy` — accepts `?api_key=<MCP_AUTH_KEY>` query parameter. Used by the
+  ChatGPT layer and by local debugging clients.
 
-#### Basic IP Allowlisting
-```json
-{
-  "acls": [
-    {
-      "action": "accept",
-      "src": ["autogroup:internet"],
-      "dst": ["your-device:funnel-port"],
-      "srcIPs": [
-        "claude-ai-ip-range-1/24",
-        "claude-ai-ip-range-2/24"
-      ]
-    }
-  ]
-}
-```
-
-#### Funnel-Specific Rules
-```json
-{
-  "nodeAttrs": [
-    {
-      "target": ["your-device"],
-      "attr": ["funnel"]
-    }
-  ],
-  "acls": [
-    {
-      "action": "accept",
-      "src": ["autogroup:internet"],
-      "dst": ["attr:funnel:*"],
-      "srcIPs": ["known-claude-ai-ranges"]
-    }
-  ]
-}
-```
+See [OAUTH_SHIM.md](./OAUTH_SHIM.md) for OAuth mode setup.
 
 ### 2. Hybrid Access Strategy (Recommended)
 
