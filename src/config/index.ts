@@ -101,7 +101,7 @@ const EnvSchema = z.object({
     .string()
     .default("/.well-known/obsidian-chatgpt-manifest.json"),
   CHATGPT_ACTIONS_PATH: z.string().default("/chatgpt/actions"),
-  MCP_AUTH_MODE: z.enum(["jwt", "oauth"]).optional(),
+  MCP_AUTH_MODE: z.enum(["legacy", "oauth"]).default("legacy"),
   MCP_AUTH_SECRET_KEY: z
     .string()
     .min(
@@ -112,6 +112,15 @@ const EnvSchema = z.object({
   OAUTH_ISSUER_URL: z.string().url().optional(),
   OAUTH_AUDIENCE: z.string().optional(),
   OAUTH_JWKS_URI: z.string().url().optional(),
+  // --- OAuth shim (MCP_AUTH_MODE=oauth) ---
+  MCP_OAUTH_ISSUER_URL: z.string().url().optional(),
+  MCP_OAUTH_ACCESS_TOKEN_TTL_SEC: z.coerce.number().int().positive().default(3600),
+  MCP_OAUTH_REFRESH_TOKEN_TTL_SEC: z.coerce.number().int().positive().default(2592000),
+  MCP_OAUTH_CODE_TTL_SEC: z.coerce.number().int().positive().default(600),
+  MCP_OAUTH_AUTO_APPROVE: z
+    .string()
+    .transform((val) => val.toLowerCase() === "true")
+    .default("false"),
   // --- MCP Authentication (for multi-vault support) ---
   MCP_AUTH_KEY: z.string().min(1, "MCP_AUTH_KEY cannot be empty").optional(),
   // --- Multi-vault configuration ---
@@ -312,6 +321,12 @@ export const config = {
   oauthIssuerUrl: env.OAUTH_ISSUER_URL,
   oauthAudience: env.OAUTH_AUDIENCE,
   oauthJwksUri: env.OAUTH_JWKS_URI,
+  // --- OAuth shim ---
+  mcpOauthIssuerUrl: env.MCP_OAUTH_ISSUER_URL,
+  mcpOauthAccessTokenTtlSec: env.MCP_OAUTH_ACCESS_TOKEN_TTL_SEC,
+  mcpOauthRefreshTokenTtlSec: env.MCP_OAUTH_REFRESH_TOKEN_TTL_SEC,
+  mcpOauthCodeTtlSec: env.MCP_OAUTH_CODE_TTL_SEC,
+  mcpOauthAutoApprove: env.MCP_OAUTH_AUTO_APPROVE,
   // --- MCP Authentication ---
   mcpAuthKey: mcpAuthKey!,
   // --- Vault Configuration ---
