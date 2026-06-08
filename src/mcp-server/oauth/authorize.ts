@@ -10,7 +10,7 @@
 import type { IncomingMessage, ServerResponse } from "http";
 import sanitizeHtml from "sanitize-html";
 import { URL } from "url";
-import { getClient, isRegisteredRedirectUri } from "./clientStore.js";
+import { isRegisteredRedirectUri, resolveClient } from "./clientStore.js";
 import { issueCode } from "./tokenStore.js";
 import { AuthorizeRequestSchema, OAuthError, SCOPES } from "./types.js";
 import type { AuthorizeRequest } from "./types.js";
@@ -115,11 +115,8 @@ export async function handleAuthorize(
 
   // Validate client + redirect_uri BEFORE rendering anything user-facing.
   // Per OAuth 2.1, redirect_uri must NEVER be inferred — only exact-match against registered URIs.
-  const client = getClient(params.client_id);
-  if (!client) {
-    // No safe redirect target — render plain error.
-    throw new OAuthError("invalid_request", `unknown client_id ${params.client_id}`, 400);
-  }
+  // resolveClient transparently fetches the CIMD document if client_id is a URL.
+  const client = await resolveClient(params.client_id);
   if (!isRegisteredRedirectUri(client, params.redirect_uri)) {
     throw new OAuthError(
       "invalid_request",

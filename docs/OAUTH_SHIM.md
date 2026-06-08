@@ -28,17 +28,37 @@ delegating to an external IdP (Auth0, Okta, Entra ID, etc.).
 | RFC 8707 Resource Indicators | enforced in `token.ts` (audience binding) |
 | RFC 6750 Bearer + `WWW-Authenticate` | `bearer.ts` |
 
-## Why DCR (not CIMD) for v1
+## Client registration: DCR + CIMD
 
-MCP 2025-11-25 demotes DCR to MAY and promotes CIMD to SHOULD. But
-[anthropics/claude-ai-mcp #82](https://github.com/anthropics/claude-ai-mcp/issues/82)
-documents that Claude.ai web ignores the `authorization_endpoint` /
-`token_endpoint` / `registration_endpoint` values from AS metadata and instead
-hits `/authorize`, `/token`, `/register` directly on the MCP server's host.
-The issue is closed as `not planned`. So we host all OAuth endpoints at the
-MCP server origin and implement DCR (which Claude.ai does drive). CIMD is
-advertised in AS metadata (`client_id_metadata_document_supported: true`) for
-forward compatibility but the endpoint is not required by Claude.ai today.
+Both registration mechanisms are implemented:
+
+- **DCR (RFC 7591)** — `POST /register` issues a UUID `client_id`. Useful for
+  manual testing and clients that follow the registration discovery in
+  authorization-server metadata.
+- **CIMD (draft-ietf-oauth-client-id-metadata-document-00)** — when an
+  `/authorize` request arrives with a URL-formatted `client_id`, the server
+  fetches that URL, validates the document, and treats it as the client's
+  registration on the fly. The server caches the parsed document with the
+  response's `Cache-Control: max-age=` (clamped to 60–3600s).
+
+CIMD support is required because **Claude.ai's actual implementation skips
+DCR and goes straight to `/authorize` with
+`client_id=https://claude.ai/oauth/mcp-oauth-client-metadata`** (verified in
+Stage 5 实机テスト, 2026-06). The original v1 plan was DCR-only, which left
+real Claude.ai connector flows broken; CIMD was added in K11 with the same
+ClientRegistration model.
+
+CIMD fetch is hardened against SSRF: HTTPS-only `client_id` URL, IP-literal
+hostnames in private / loopback / link-local / CGNAT ranges are blocked,
+redirects are refused, body is capped at 64 KiB, request times out at 5s.
+DNS-resolving hostnames (e.g. `internal.corp.example`) are NOT pre-resolved
+— operators relying on local-only services should add firewall rules at the
+host layer.
+
+The original [issue #82](https://github.com/anthropics/claude-ai-mcp/issues/82)
+behavior is unaffected: all OAuth endpoints (`/authorize`, `/token`,
+`/register`, `.well-known/*`) are hosted on the MCP server's origin, so
+Claude.ai's "ignore metadata and hit endpoints by convention" still works.
 
 ## Enabling
 
@@ -84,7 +104,9 @@ development) by setting `MCP_AUTH_MODE=legacy`.
   will work; non-compliant clients (Claude.ai web) that ignore metadata also
   work because the endpoint paths happen to match.
 
-## Manual test recipe (Stage 5)
+## Manual test recipe
+
+### DCR flow
 
 ```bash
 # 1. Discovery
@@ -113,6 +135,38 @@ curl -s https://<issuer>/mcp \
   -H "Authorization: Bearer <ACCESS_TOKEN>" \
   -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{...}}'
+```
+
+### CIMD flow (mimics Claude.ai)
+
+```bash
+# 1. (no /register call) — use a URL-formatted client_id pointing to a CIMD doc.
+#    Claude.ai uses https://claude.ai/oauth/mcp-oauth-client-metadata which
+#    points to https://claude.ai/api/mcp/auth_callback as the only redirect_uri.
+
+# 2. Authorize — the server fetches the CIMD URL on this request,
+#    validates the document, and shows the consent page (or 302s if auto-approve).
+CIMD="https://claude.ai/oauth/mcp-oauth-client-metadata"
+REDIRECT="https://claude.ai/api/mcp/auth_callback"
+VERIFIER=$(node -e "console.log(require('crypto').randomBytes(48).toString('base64url'))")
+CHALLENGE=$(node -e "console.log(require('crypto').createHash('sha256').update('$VERIFIER').digest().toString('base64url'))")
+
+# Encode for the URL
+CIMD_ENC=$(node -e "console.log(encodeURIComponent('$CIMD'))")
+REDIRECT_ENC=$(node -e "console.log(encodeURIComponent('$REDIRECT'))")
+RESOURCE_ENC=$(node -e "console.log(encodeURIComponent('https://<issuer>/mcp'))")
+
+# Expect HTTP 200 (consent HTML) on first call; the server fetches the CIMD doc.
+curl -s -i "https://<issuer>/authorize?response_type=code&client_id=$CIMD_ENC&redirect_uri=$REDIRECT_ENC&code_challenge=$CHALLENGE&code_challenge_method=S256&state=xyz&scope=mcp&resource=$RESOURCE_ENC" | head -15
+
+# To test programmatically against your OWN CIMD doc, host a JSON file with
+# the shape:
+#   {"client_id":"https://your-host/your-cimd.json","redirect_uris":["http://127.0.0.1:9000/cb"],"token_endpoint_auth_method":"none"}
+# and substitute its URL for $CIMD above. Auto-approve the consent step
+# (MCP_OAUTH_AUTO_APPROVE=true) so a curl-only loop captures the redirect.
+
+# 3. Token exchange + Bearer use is identical to the DCR flow — the client_id
+#    field in the /token request body is the URL string itself.
 ```
 
 ## Unit tests

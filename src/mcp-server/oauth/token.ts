@@ -8,7 +8,6 @@
  */
 
 import type { IncomingMessage, ServerResponse } from "http";
-import { getClient } from "./clientStore.js";
 import { verifyS256Challenge } from "./pkce.js";
 import {
   consumeCode,
@@ -50,9 +49,10 @@ async function handleAuthCode(form: Record<string, string>, deps: TokenDeps): Pr
   }
   const r = parsed.data;
 
-  const client = getClient(r.client_id);
-  if (!client) throw new OAuthError("invalid_client", "unknown client_id", 401);
-
+  // Note: no client_id existence check here — the code → client binding below
+  // is the authoritative proof that this client was approved at /authorize time.
+  // For CIMD clients, re-fetching the metadata document on every /token call
+  // would add an unnecessary network round-trip per refresh.
   const code = consumeCode(r.code);
   if (code.clientId !== r.client_id) {
     throw new OAuthError("invalid_grant", "code was issued to a different client", 400);
@@ -103,9 +103,7 @@ async function handleRefresh(form: Record<string, string>, deps: TokenDeps): Pro
   }
   const r = parsed.data;
 
-  const client = getClient(r.client_id);
-  if (!client) throw new OAuthError("invalid_client", "unknown client_id", 401);
-
+  // refresh token → client binding is verified by rotateRefreshToken.
   const old = rotateRefreshToken(r.refresh_token, r.client_id);
   if (old.resource !== r.resource) {
     throw new OAuthError("invalid_grant", "resource indicator does not match", 400);

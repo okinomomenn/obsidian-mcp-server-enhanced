@@ -9,7 +9,7 @@ import { z } from "zod";
 export const SCOPES = ["mcp"] as const;
 export type Scope = (typeof SCOPES)[number];
 
-/** A dynamically-registered OAuth client (RFC 7591). */
+/** A registered or fetched OAuth client. Unified view over DCR + CIMD. */
 export interface ClientRegistration {
   clientId: string;
   clientName: string;
@@ -17,6 +17,8 @@ export interface ClientRegistration {
   createdAt: number;
   /** Token endpoint auth method — always "none" in v1 (public clients only). */
   tokenEndpointAuthMethod: "none";
+  /** Where the registration came from. "dcr" = POST /register, "cimd" = fetched from URL client_id. */
+  source: "dcr" | "cimd";
 }
 
 /** A short-lived authorization code, single-use, PKCE-bound. */

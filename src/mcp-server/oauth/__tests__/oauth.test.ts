@@ -14,10 +14,17 @@ import { afterEach, describe, it } from "node:test";
 
 import { verifyS256Challenge } from "../pkce.js";
 import {
+  _resetCimdCache,
+  isPrivateHostname,
+  isUrlClientId,
+  parseAndValidateCimdDocument,
+} from "../cimd.js";
+import {
   _resetClientStore,
   createClient,
   getClient,
   isRegisteredRedirectUri,
+  resolveClient,
 } from "../clientStore.js";
 import {
   _resetTokenStore,
@@ -44,6 +51,7 @@ const RESOURCE = AUDIENCE;
 afterEach(() => {
   _resetClientStore();
   _resetTokenStore();
+  _resetCimdCache();
 });
 
 describe("pkce.verifyS256Challenge", () => {
@@ -69,6 +77,7 @@ describe("clientStore", () => {
     const c = createClient({ clientName: "Test", redirectUris: ["https://app.test/cb"] });
     assert.match(c.clientId, /^[0-9a-f-]{36}$/);
     assert.equal(c.tokenEndpointAuthMethod, "none");
+    assert.equal(c.source, "dcr");
     assert.deepEqual(getClient(c.clientId)?.redirectUris, ["https://app.test/cb"]);
   });
 
@@ -77,6 +86,122 @@ describe("clientStore", () => {
     assert.equal(isRegisteredRedirectUri(c, "https://app.test/cb"), true);
     assert.equal(isRegisteredRedirectUri(c, "https://app.test/cb/"), false);
     assert.equal(isRegisteredRedirectUri(c, "https://APP.test/cb"), false);
+  });
+
+  it("resolveClient returns DCR client for UUID and throws for unknown", async () => {
+    const c = createClient({ redirectUris: ["https://app.test/cb"] });
+    const resolved = await resolveClient(c.clientId);
+    assert.equal(resolved.clientId, c.clientId);
+    await assert.rejects(resolveClient("not-registered"), (e: unknown) =>
+      e instanceof OAuthError && e.code === "invalid_request",
+    );
+  });
+});
+
+describe("cimd — URL detection", () => {
+  it("isUrlClientId matches https URLs", () => {
+    assert.equal(isUrlClientId("https://claude.ai/oauth/mcp-oauth-client-metadata"), true);
+    assert.equal(isUrlClientId("HTTPS://example.test/x.json"), true);
+  });
+  it("isUrlClientId rejects non-URL and http://", () => {
+    assert.equal(isUrlClientId("7dc0fa8c-d028-453c-bf8a-10db41c0ce3c"), false);
+    assert.equal(isUrlClientId("http://example.test/x.json"), false);
+    assert.equal(isUrlClientId(""), false);
+  });
+});
+
+describe("cimd — SSRF guard (isPrivateHostname)", () => {
+  it("blocks loopback names and literals", () => {
+    assert.equal(isPrivateHostname("localhost"), true);
+    assert.equal(isPrivateHostname("127.0.0.1"), true);
+    assert.equal(isPrivateHostname("127.250.99.7"), true);
+    assert.equal(isPrivateHostname("::1"), true);
+    assert.equal(isPrivateHostname("[::1]"), true);
+  });
+  it("blocks RFC1918 private ranges", () => {
+    assert.equal(isPrivateHostname("10.0.0.1"), true);
+    assert.equal(isPrivateHostname("172.16.5.5"), true);
+    assert.equal(isPrivateHostname("172.31.255.255"), true);
+    assert.equal(isPrivateHostname("192.168.1.1"), true);
+  });
+  it("blocks link-local + CGNAT + 0.x", () => {
+    assert.equal(isPrivateHostname("169.254.169.254"), true); // AWS metadata
+    assert.equal(isPrivateHostname("100.64.0.1"), true);
+    assert.equal(isPrivateHostname("0.0.0.0"), true);
+  });
+  it("blocks IPv6 unique-local + link-local", () => {
+    assert.equal(isPrivateHostname("fe80::1"), true);
+    assert.equal(isPrivateHostname("fc00::1"), true);
+    assert.equal(isPrivateHostname("fd12:3456:789a::1"), true);
+  });
+  it("allows public hostnames + public IPv4 literals", () => {
+    assert.equal(isPrivateHostname("claude.ai"), false);
+    assert.equal(isPrivateHostname("example.com"), false);
+    assert.equal(isPrivateHostname("8.8.8.8"), false);
+    assert.equal(isPrivateHostname("1.1.1.1"), false);
+    assert.equal(isPrivateHostname("172.32.0.1"), false); // just outside 172.16/12
+  });
+});
+
+describe("cimd — parseAndValidateCimdDocument", () => {
+  const URL_OK = "https://claude.ai/oauth/mcp-oauth-client-metadata";
+
+  it("accepts the real Claude.ai CIMD shape", () => {
+    const doc = {
+      client_id: URL_OK,
+      client_name: "Claude",
+      client_uri: "https://claude.ai",
+      redirect_uris: ["https://claude.ai/api/mcp/auth_callback"],
+      grant_types: ["authorization_code", "refresh_token"],
+      response_types: ["code"],
+      token_endpoint_auth_method: "none",
+    };
+    const c = parseAndValidateCimdDocument(doc, URL_OK);
+    assert.equal(c.clientId, URL_OK);
+    assert.equal(c.clientName, "Claude");
+    assert.equal(c.source, "cimd");
+    assert.deepEqual(c.redirectUris, ["https://claude.ai/api/mcp/auth_callback"]);
+  });
+
+  it("rejects client_id mismatch", () => {
+    assert.throws(
+      () => parseAndValidateCimdDocument({ client_id: "https://other.example/x.json", redirect_uris: ["https://x/y"] }, URL_OK),
+      (e: unknown) => e instanceof OAuthError && e.code === "invalid_client" && /does not match/.test(e.description),
+    );
+  });
+
+  it("rejects missing or empty redirect_uris", () => {
+    assert.throws(() => parseAndValidateCimdDocument({ client_id: URL_OK }, URL_OK));
+    assert.throws(() => parseAndValidateCimdDocument({ client_id: URL_OK, redirect_uris: [] }, URL_OK));
+  });
+
+  it("rejects http:// redirect_uri to non-loopback", () => {
+    assert.throws(
+      () => parseAndValidateCimdDocument({ client_id: URL_OK, redirect_uris: ["http://evil.example/cb"] }, URL_OK),
+      (e: unknown) => e instanceof OAuthError && e.code === "invalid_client",
+    );
+  });
+
+  it("accepts http://localhost and http://127.0.0.1 redirect_uri", () => {
+    assert.doesNotThrow(() => parseAndValidateCimdDocument({ client_id: URL_OK, redirect_uris: ["http://localhost:9000/cb"] }, URL_OK));
+    assert.doesNotThrow(() => parseAndValidateCimdDocument({ client_id: URL_OK, redirect_uris: ["http://127.0.0.1:9000/cb"] }, URL_OK));
+  });
+
+  it("rejects non-none token_endpoint_auth_method", () => {
+    assert.throws(
+      () => parseAndValidateCimdDocument({
+        client_id: URL_OK,
+        redirect_uris: ["https://app/cb"],
+        token_endpoint_auth_method: "client_secret_basic",
+      }, URL_OK),
+      (e: unknown) => e instanceof OAuthError && e.code === "invalid_client",
+    );
+  });
+
+  it("rejects non-object / null / array input", () => {
+    assert.throws(() => parseAndValidateCimdDocument(null, URL_OK));
+    assert.throws(() => parseAndValidateCimdDocument([], URL_OK));
+    assert.throws(() => parseAndValidateCimdDocument("string", URL_OK));
   });
 });
 
