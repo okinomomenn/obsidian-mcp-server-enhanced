@@ -17,6 +17,9 @@ import {
 } from "../../utils/index.js";
 import { VaultManager } from "../../services/vaultManager/index.js";
 import { handleChatGptLayerRequest } from "../../chatgpt/layer.js";
+import { verifyBearer } from "../oauth/bearer.js";
+import { buildOAuthDepsFromConfig, routeOAuth, type OAuthRouterDeps } from "../oauth/router.js";
+import { startTokenStoreGc } from "../oauth/tokenStore.js";
 
 const HTTP_PORT = config.mcpHttpPort;
 const HTTP_HOST = config.mcpHttpHost;
@@ -128,6 +131,29 @@ async function parseJsonBody(req: http.IncomingMessage): Promise<any> {
 }
 
 /**
+ * Parses request body as application/x-www-form-urlencoded.
+ */
+async function parseFormBody(req: http.IncomingMessage): Promise<Record<string, string>> {
+  return new Promise((resolve, reject) => {
+    let body = "";
+    req.on("data", (chunk) => {
+      body += chunk.toString();
+    });
+    req.on("end", () => {
+      try {
+        const params = new URLSearchParams(body);
+        const out: Record<string, string> = {};
+        for (const [k, v] of params) out[k] = v;
+        resolve(out);
+      } catch (err) {
+        reject(err);
+      }
+    });
+    req.on("error", reject);
+  });
+}
+
+/**
  * Starts the pure Node.js HTTP server for MCP transport.
  */
 export async function startHttpTransport(
@@ -140,6 +166,16 @@ export async function startHttpTransport(
     transportType: "HTTP",
     component: "HttpTransportSetup",
   });
+
+  // --- OAuth shim setup (only when MCP_AUTH_MODE=oauth) ---
+  let oauthDeps: OAuthRouterDeps | undefined;
+  if (config.mcpAuthMode === "oauth") {
+    oauthDeps = buildOAuthDepsFromConfig(MCP_ENDPOINT_PATH);
+    startTokenStoreGc();
+    logger.info(`OAuth shim active (issuer=${oauthDeps.issuerUrl}, audience=${oauthDeps.issuerUrl}${MCP_ENDPOINT_PATH})`, transportContext);
+  } else {
+    logger.info("OAuth shim disabled (MCP_AUTH_MODE=legacy) — using ?api_key= auth", transportContext);
+  }
 
   // Start session garbage collector
   setInterval(() => {
@@ -196,6 +232,18 @@ export async function startHttpTransport(
         return;
       }
 
+      // OAuth discovery + DCR + authorize + token (no Bearer required on these paths).
+      if (oauthDeps && (await routeOAuth(
+        req,
+        res,
+        url,
+        () => parseJsonBody(req),
+        () => parseFormBody(req),
+        oauthDeps,
+      ))) {
+        return;
+      }
+
       // Only handle our MCP endpoint
       if (url.pathname !== MCP_ENDPOINT_PATH) {
         res.writeHead(404);
@@ -209,8 +257,16 @@ export async function startHttpTransport(
         return;
       }
 
-      // Validate API key if authentication is configured
-      if (!validateApiKey(req, url)) {
+      // Authentication: OAuth Bearer (mode=oauth) or legacy ?api_key= (mode=legacy)
+      if (oauthDeps) {
+        const claims = await verifyBearer(req, res, {
+          jwtSecret: oauthDeps.jwtSecret,
+          issuerUrl: oauthDeps.issuerUrl,
+          audience: `${oauthDeps.issuerUrl}${MCP_ENDPOINT_PATH}`,
+          resourceMetadataUrl: `${oauthDeps.issuerUrl}/.well-known/oauth-protected-resource`,
+        });
+        if (!claims) return; // verifyBearer already wrote the 401 response
+      } else if (!validateApiKey(req, url)) {
         logger.warning(`Authentication failed for request: ${req.method} ${req.url}`, {
           ...requestContext,
           authFailure: true,
