@@ -16,10 +16,15 @@
 import { OAuthError, type ClientRegistration } from "./types.js";
 
 /** A fetched & validated client metadata document, normalized to ClientRegistration. */
-const FETCH_TIMEOUT_MS = 5_000;
+// 2026-07-28: host egress observed at 4–19s TLS to the whole internet (not CIMD-host
+// specific), so the previous 5_000ms aborted almost every fetch → invalid_client.
+// Raised timeout, added bounded retries, and stale-on-error fallback below.
+// Prior values (for rollback): FETCH_TIMEOUT_MS=5_000, no retry, MIN_TTL_SEC=60.
+const FETCH_TIMEOUT_MS = 30_000;
+const FETCH_RETRIES = 2; // total attempts = 1 + FETCH_RETRIES
 const MAX_BODY_BYTES = 64 * 1024;
 const DEFAULT_TTL_SEC = 300;
-const MIN_TTL_SEC = 60;
+const MIN_TTL_SEC = 300;
 const MAX_TTL_SEC = 3600;
 
 interface CacheEntry {
@@ -176,43 +181,59 @@ export async function fetchCimdClient(clientIdUrl: string): Promise<ClientRegist
     throw new OAuthError("invalid_client", `CIMD client_id URL hostname ${parsedUrl.hostname} is in a blocked range`, 400);
   }
 
-  const response = await fetch(clientIdUrl, {
-    method: "GET",
-    headers: { Accept: "application/json" },
-    redirect: "error",
-    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-  }).catch((err: unknown) => {
-    throw new OAuthError(
-      "invalid_client",
-      `CIMD fetch failed: ${err instanceof Error ? err.message : String(err)}`,
-      400,
-    );
-  });
+  // Fetch + validate, retried on failure. Slow/flaky host egress (observed 4–19s
+  // TLS) means a single 5s attempt aborted almost every time; retry with the full
+  // timeout each attempt gives the handshake a chance to complete.
+  let lastErr: unknown;
+  for (let attempt = 0; attempt <= FETCH_RETRIES; attempt++) {
+    try {
+      const response = await fetch(clientIdUrl, {
+        method: "GET",
+        headers: { Accept: "application/json" },
+        redirect: "error",
+        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+      });
 
-  if (response.status !== 200) {
-    throw new OAuthError("invalid_client", `CIMD fetch returned HTTP ${response.status}`, 400);
-  }
-  const contentType = (response.headers.get("content-type") || "").toLowerCase();
-  if (!contentType.startsWith("application/json")) {
-    throw new OAuthError("invalid_client", `CIMD response Content-Type must be application/json, got "${contentType}"`, 400);
+      if (response.status !== 200) {
+        throw new OAuthError("invalid_client", `CIMD fetch returned HTTP ${response.status}`, 400);
+      }
+      const contentType = (response.headers.get("content-type") || "").toLowerCase();
+      if (!contentType.startsWith("application/json")) {
+        throw new OAuthError("invalid_client", `CIMD response Content-Type must be application/json, got "${contentType}"`, 400);
+      }
+
+      // Bounded read.
+      const buffer = await response.arrayBuffer();
+      if (buffer.byteLength > MAX_BODY_BYTES) {
+        throw new OAuthError("invalid_client", `CIMD response body exceeds ${MAX_BODY_BYTES} bytes`, 400);
+      }
+      let json: unknown;
+      try {
+        json = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(buffer));
+      } catch (err) {
+        throw new OAuthError("invalid_client", `CIMD body is not valid JSON: ${err instanceof Error ? err.message : String(err)}`, 400);
+      }
+
+      const client = parseAndValidateCimdDocument(json, clientIdUrl);
+      const ttlSec = parseMaxAgeSec(response.headers.get("cache-control"));
+      cache.set(clientIdUrl, { client, expiresAt: Date.now() + ttlSec * 1000 });
+      return client;
+    } catch (err) {
+      lastErr = err;
+      // fall through to retry
+    }
   }
 
-  // Bounded read.
-  const buffer = await response.arrayBuffer();
-  if (buffer.byteLength > MAX_BODY_BYTES) {
-    throw new OAuthError("invalid_client", `CIMD response body exceeds ${MAX_BODY_BYTES} bytes`, 400);
+  // All attempts failed. Serve a stale-but-previously-valid document if we have
+  // one — a transient egress hiccup must not tear down an established client.
+  if (cached) {
+    return cached.client;
   }
-  let json: unknown;
-  try {
-    json = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(buffer));
-  } catch (err) {
-    throw new OAuthError("invalid_client", `CIMD body is not valid JSON: ${err instanceof Error ? err.message : String(err)}`, 400);
-  }
-
-  const client = parseAndValidateCimdDocument(json, clientIdUrl);
-  const ttlSec = parseMaxAgeSec(response.headers.get("cache-control"));
-  cache.set(clientIdUrl, { client, expiresAt: Date.now() + ttlSec * 1000 });
-  return client;
+  throw new OAuthError(
+    "invalid_client",
+    `CIMD fetch failed after ${FETCH_RETRIES + 1} attempts: ${lastErr instanceof Error ? lastErr.message : String(lastErr)}`,
+    400,
+  );
 }
 
 /** Test-only helper. */
