@@ -359,4 +359,45 @@ describe("schemas — request body validation", () => {
       true,
     );
   });
+
+  // Regression: claude.ai omits `resource` on /token. RFC 8707 §2.2 makes it
+  // OPTIONAL there (the resource bound at /authorize is authoritative). Requiring
+  // it produced invalid_request 400 and broke the connector handshake.
+  it("TokenAuthCodeRequestSchema accepts a request with no resource", () => {
+    assert.equal(
+      TokenAuthCodeRequestSchema.safeParse({
+        grant_type: "authorization_code",
+        code: "abc",
+        redirect_uri: "https://app/cb",
+        client_id: "c",
+        code_verifier: "a".repeat(43),
+      }).success,
+      true,
+    );
+  });
+
+  it("TokenRefreshRequestSchema accepts a request with no resource", () => {
+    assert.equal(
+      TokenRefreshRequestSchema.safeParse({
+        grant_type: "refresh_token",
+        refresh_token: "rt",
+        client_id: "c",
+      }).success,
+      true,
+    );
+  });
+
+  it("TokenAuthCodeRequestSchema still rejects a malformed resource when present", () => {
+    assert.equal(
+      TokenAuthCodeRequestSchema.safeParse({
+        grant_type: "authorization_code",
+        code: "abc",
+        redirect_uri: "https://app/cb",
+        client_id: "c",
+        code_verifier: "a".repeat(43),
+        resource: "not-a-url",
+      }).success,
+      false,
+    );
+  });
 });

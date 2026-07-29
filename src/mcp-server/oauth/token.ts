@@ -60,8 +60,10 @@ async function handleAuthCode(form: Record<string, string>, deps: TokenDeps): Pr
   if (code.redirectUri !== r.redirect_uri) {
     throw new OAuthError("invalid_grant", "redirect_uri does not match authorize request", 400);
   }
-  // RFC 8707 audience binding — the resource at /token must match the one at /authorize.
-  if (code.resource !== r.resource) {
+  // RFC 8707 audience binding — when the client repeats `resource` it must match the
+  // one bound at /authorize. When omitted (RFC 8707 §2.2 permits this, and claude.ai
+  // does omit it) the code's bound resource is authoritative and is used below.
+  if (r.resource !== undefined && code.resource !== r.resource) {
     throw new OAuthError("invalid_grant", "resource indicator does not match", 400);
   }
   if (!verifyS256Challenge(r.code_verifier, code.codeChallenge)) {
@@ -105,7 +107,8 @@ async function handleRefresh(form: Record<string, string>, deps: TokenDeps): Pro
 
   // refresh token → client binding is verified by rotateRefreshToken.
   const old = rotateRefreshToken(r.refresh_token, r.client_id);
-  if (old.resource !== r.resource) {
+  // Same RFC 8707 §2.2 rule as the authorization_code grant: verify only when sent.
+  if (r.resource !== undefined && old.resource !== r.resource) {
     throw new OAuthError("invalid_grant", "resource indicator does not match", 400);
   }
 

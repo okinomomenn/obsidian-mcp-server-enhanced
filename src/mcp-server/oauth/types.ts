@@ -88,7 +88,12 @@ export const TokenAuthCodeRequestSchema = z.object({
   redirect_uri: z.string().url(),
   client_id: z.string().min(1),
   code_verifier: z.string().min(43).max(128),
-  resource: z.string().url(),
+  /**
+   * RFC 8707 §2.2 — OPTIONAL at the token endpoint. When omitted the AS uses the
+   * resource bound at authorization time. claude.ai omits it; requiring it here
+   * made /token fail closed with invalid_request and broke the connector.
+   */
+  resource: z.string().url().optional(),
 });
 export type TokenAuthCodeRequest = z.infer<typeof TokenAuthCodeRequestSchema>;
 
@@ -97,7 +102,8 @@ export const TokenRefreshRequestSchema = z.object({
   grant_type: z.literal("refresh_token"),
   refresh_token: z.string().min(1),
   client_id: z.string().min(1),
-  resource: z.string().url(),
+  /** RFC 8707 §2.2 — OPTIONAL; falls back to the resource bound to the refresh token. */
+  resource: z.string().url().optional(),
   scope: z.string().optional(),
 });
 export type TokenRefreshRequest = z.infer<typeof TokenRefreshRequestSchema>;
