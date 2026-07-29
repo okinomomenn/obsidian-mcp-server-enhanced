@@ -30,7 +30,14 @@ export interface OAuthRouterDeps {
 }
 
 function writeJson(res: ServerResponse, status: number, body: unknown): void {
-  res.writeHead(status, { "Content-Type": "application/json" });
+  // well-known metadata endpoints use writeJson exclusively (router.ts:61,65).
+  // Force clients to re-fetch on every connection so server-side metadata changes
+  // (e.g. capability advertisement) propagate immediately. See Stage 1.7 recon.
+  res.writeHead(status, {
+    "Content-Type": "application/json",
+    "Cache-Control": "no-store",
+    "Pragma": "no-cache",
+  });
   res.end(JSON.stringify(body));
 }
 
@@ -82,6 +89,7 @@ export async function routeOAuth(
       await handleAuthorize(req, res, url, parseFormBody, {
         autoApprove: deps.autoApprove,
         codeTtlSec: deps.codeTtlSec,
+        issuerUrl: deps.issuerUrl,
       });
     } catch (err) {
       handleErr(req, res, err, "authorize");

@@ -18,6 +18,8 @@ import type { AuthorizeRequest } from "./types.js";
 export interface AuthorizeDeps {
   autoApprove: boolean;
   codeTtlSec: number;
+  /** Canonical issuer URL (no trailing slash) — emitted as `iss` per RFC 9207. */
+  issuerUrl: string;
 }
 
 /** Render a minimal consent page. All dynamic values are escaped. */
@@ -58,19 +60,22 @@ function renderConsent(params: AuthorizeRequest, clientName: string): string {
 </body></html>`;
 }
 
-function redirectWithCode(res: ServerResponse, redirectUri: string, code: string, state: string): void {
+function redirectWithCode(res: ServerResponse, redirectUri: string, code: string, state: string, issuerUrl: string): void {
   const url = new URL(redirectUri);
   url.searchParams.set("code", code);
   url.searchParams.set("state", state);
+  // RFC 9207 §2 — advertised via `authorization_response_iss_parameter_supported: true`.
+  url.searchParams.set("iss", issuerUrl);
   res.writeHead(302, { Location: url.toString() });
   res.end();
 }
 
-function redirectWithError(res: ServerResponse, redirectUri: string, error: string, description: string, state: string): void {
+function redirectWithError(res: ServerResponse, redirectUri: string, error: string, description: string, state: string, issuerUrl: string): void {
   const url = new URL(redirectUri);
   url.searchParams.set("error", error);
   url.searchParams.set("error_description", description);
   url.searchParams.set("state", state);
+  url.searchParams.set("iss", issuerUrl);
   res.writeHead(302, { Location: url.toString() });
   res.end();
 }
@@ -131,7 +136,7 @@ export async function handleAuthorize(
   if (grantedScopes.length === 0) grantedScopes.push("mcp");
 
   if (decision === "deny") {
-    redirectWithError(res, params.redirect_uri, "access_denied", "user denied consent", params.state);
+    redirectWithError(res, params.redirect_uri, "access_denied", "user denied consent", params.state, deps.issuerUrl);
     return;
   }
 
@@ -151,5 +156,5 @@ export async function handleAuthorize(
     scope: grantedScopes.join(" "),
     ttlSec: deps.codeTtlSec,
   });
-  redirectWithCode(res, params.redirect_uri, code.code, params.state);
+  redirectWithCode(res, params.redirect_uri, code.code, params.state, deps.issuerUrl);
 }
