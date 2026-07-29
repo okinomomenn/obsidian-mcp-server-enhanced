@@ -171,3 +171,6 @@ docs/api/
 
 logs/*.pid
 test-*.js
+
+# Agent harness local state (per-checkout, never shared)
+.claude/
