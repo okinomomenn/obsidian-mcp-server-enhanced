@@ -234,11 +234,11 @@ export class Logger {
         }),
       );
     } else {
-      if (process.stdout.isTTY) {
-        console.warn(
-          "File logging disabled as logsPath is not configured or invalid.",
-        );
-      }
+      // Unconditional: console.warn writes to stderr, which is protocol-safe under
+      // the stdio transport and is the only channel a service manager can capture.
+      console.warn(
+        "File logging disabled as logsPath is not configured or invalid.",
+      );
     }
 
     this.winstonLogger = winston.createLogger({
@@ -299,9 +299,7 @@ export class Logger {
       timestamp: new Date().toISOString(),
     };
     if (!this.ensureInitialized()) {
-      if (process.stdout.isTTY) {
-        console.error("Cannot set level: Logger not initialized.");
-      }
+      console.error("Cannot set level: Logger not initialized.");
       return;
     }
     if (!(newLevel in mcpLevelSeverity)) {
@@ -356,22 +354,47 @@ export class Logger {
     const consoleTransport = this.winstonLogger.transports.find(
       (t) => t instanceof winston.transports.Console,
     );
-    const shouldHaveConsole =
-      this.currentMcpLevel === "debug" && process.stdout.isTTY;
+    const isTty = process.stdout.isTTY;
+
+    /**
+     * Two distinct consumers:
+     *
+     *   - Interactive TTY: the developer asked for `debug`, so mirror everything.
+     *   - No TTY: a service manager is capturing the streams to files. Previously
+     *     this case attached no transport at all, so NSSM's capture files were
+     *     empty for the service's entire history — a silent crash-loop produced
+     *     thousands of 0-byte files and no clue. Attach at `warn` so problems
+     *     surface there, while the full stream stays in the rotating file
+     *     transports. Mirroring `info` would double the log volume into a capture
+     *     file whose rotation this process does not control.
+     *
+     * CRITICAL: in the non-TTY case the transport writes to **stderr**, never
+     * stdout. Under `MCP_TRANSPORT_TYPE=stdio` stdout IS the JSON-RPC channel and
+     * stdout is not a TTY, so writing log lines there would corrupt the protocol.
+     * stderr is free in both transports.
+     */
+    const shouldHaveConsole = isTty ? this.currentMcpLevel === "debug" : true;
+    const desiredLevel = isTty ? "debug" : "warn";
     let message: string | null = null;
 
-    if (shouldHaveConsole && !consoleTransport) {
-      const consoleFormat = createWinstonConsoleFormat();
+    const levelMatches =
+      consoleTransport && (consoleTransport as winston.transport).level === desiredLevel;
+
+    if (shouldHaveConsole && !levelMatches) {
+      if (consoleTransport) this.winstonLogger.remove(consoleTransport);
       this.winstonLogger.add(
         new winston.transports.Console({
-          level: "debug", // Console always logs debug if enabled
-          format: consoleFormat,
+          level: desiredLevel,
+          format: createWinstonConsoleFormat(),
+          // Empty array = everything on stdout (the TTY case). Otherwise route the
+          // levels we emit to stderr so stdout stays protocol-clean.
+          stderrLevels: isTty ? [] : ["error", "warn"],
         }),
       );
-      message = "Console logging enabled (level: debug, stdout is TTY).";
+      message = `Console logging enabled (level: ${desiredLevel}, stdout is ${isTty ? "TTY" : "not a TTY — service-managed, routed to stderr"}).`;
     } else if (!shouldHaveConsole && consoleTransport) {
       this.winstonLogger.remove(consoleTransport);
-      message = "Console logging disabled (level not debug or stdout not TTY).";
+      message = "Console logging disabled (level not debug on an interactive TTY).";
     } else {
       message = "Console logging status unchanged.";
     }
@@ -396,9 +419,7 @@ export class Logger {
    */
   private ensureInitialized(): boolean {
     if (!this.initialized || !this.winstonLogger) {
-      if (process.stdout.isTTY) {
-        console.warn("Logger not initialized; message dropped.");
-      }
+      console.warn("Logger not initialized; message dropped.");
       return false;
     }
     return true;

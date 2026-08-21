@@ -50,12 +50,10 @@ let pkg = { name: "obsidian-mcp-server", version: "0.0.0" };
 try {
   pkg = JSON.parse(readFileSync(pkgPath, "utf-8"));
 } catch (error) {
-  if (process.stderr.isTTY) {
-    console.error(
-      "Warning: Could not read package.json for default config values. Using hardcoded defaults.",
-      error,
-    );
-  }
+  console.error(
+    "Warning: Could not read package.json for default config values. Using hardcoded defaults.",
+    error,
+  );
 }
 
 /**
@@ -152,9 +150,7 @@ const parsedEnv = EnvSchema.safeParse(process.env);
 
 if (!parsedEnv.success) {
   const errorDetails = parsedEnv.error.flatten().fieldErrors;
-  if (process.stderr.isTTY) {
-    console.error("❌ Invalid environment variables:", errorDetails);
-  }
+  console.error("❌ Invalid environment variables:", errorDetails);
   throw new Error(
     `Invalid environment configuration. Please check your .env file or environment variables. Details: ${JSON.stringify(errorDetails)}`,
   );
@@ -208,9 +204,7 @@ if (env.OBSIDIAN_VAULTS) {
     mcpAuthKey = env.MCP_AUTH_KEY;
     isMultiVaultMode = true;
   } catch (error) {
-    if (process.stderr.isTTY) {
-      console.error("❌ Error parsing OBSIDIAN_VAULTS:", error);
-    }
+    console.error("❌ Error parsing OBSIDIAN_VAULTS:", error);
     throw new Error(`Failed to parse OBSIDIAN_VAULTS: ${error instanceof Error ? error.message : String(error)}`);
   }
 } else if (env.OBSIDIAN_API_KEY) {
@@ -230,6 +224,16 @@ if (env.OBSIDIAN_VAULTS) {
 }
 
 // --- Directory Ensurance Function ---
+/**
+ * NOTE ON DIAGNOSTICS: the errors below were previously gated on
+ * `process.stderr.isTTY`. Under a service manager (NSSM) stderr is a redirected
+ * file, never a TTY, so every failure here — including the fatal one that calls
+ * process.exit(1) — was emitted to nobody. The service would exit silently and
+ * be restarted on a loop, producing only empty capture files. These messages are
+ * the sole diagnostic available at this stage: the winston logger is not yet
+ * constructed (it needs the very path being validated), so they must be
+ * unconditional.
+ */
 const ensureDirectory = (
   dirPath: string,
   rootDir: string,
@@ -243,11 +247,9 @@ const ensureDirectory = (
     !resolvedDirPath.startsWith(rootDir + path.sep) &&
     resolvedDirPath !== rootDir
   ) {
-    if (process.stderr.isTTY) {
-      console.error(
-        `Error: ${dirName} path "${dirPath}" resolves to "${resolvedDirPath}", which is outside the project boundary "${rootDir}".`,
-      );
-    }
+    console.error(
+      `Error: ${dirName} path "${dirPath}" resolves to "${resolvedDirPath}", which is outside the project boundary "${rootDir}".`,
+    );
     return null;
   }
 
@@ -255,29 +257,23 @@ const ensureDirectory = (
     try {
       mkdirSync(resolvedDirPath, { recursive: true });
     } catch (err: unknown) {
-      if (process.stderr.isTTY) {
-        console.error(
-          `Error creating ${dirName} directory at ${resolvedDirPath}: ${err instanceof Error ? err.message : String(err)}`,
-        );
-      }
+      console.error(
+        `Error creating ${dirName} directory at ${resolvedDirPath}: ${err instanceof Error ? err.message : String(err)}`,
+      );
       return null;
     }
   } else {
     try {
       if (!statSync(resolvedDirPath).isDirectory()) {
-        if (process.stderr.isTTY) {
-          console.error(
-            `Error: ${dirName} path ${resolvedDirPath} exists but is not a directory.`,
-          );
-        }
+        console.error(
+          `Error: ${dirName} path ${resolvedDirPath} exists but is not a directory.`,
+        );
         return null;
       }
     } catch (statError: any) {
-      if (process.stderr.isTTY) {
-        console.error(
-          `Error accessing ${dirName} path ${resolvedDirPath}: ${statError.message}`,
-        );
-      }
+      console.error(
+        `Error accessing ${dirName} path ${resolvedDirPath}: ${statError.message}`,
+      );
       return null;
     }
   }
@@ -288,11 +284,9 @@ const ensureDirectory = (
 const validatedLogsPath = ensureDirectory(env.LOGS_DIR, projectRoot, "logs");
 
 if (!validatedLogsPath) {
-  if (process.stderr.isTTY) {
-    console.error(
-      "FATAL: Logs directory configuration is invalid or could not be created. Please check permissions and path. Exiting.",
-    );
-  }
+  console.error(
+    "FATAL: Logs directory configuration is invalid or could not be created. Please check permissions and path. Exiting.",
+  );
   process.exit(1);
 }
 

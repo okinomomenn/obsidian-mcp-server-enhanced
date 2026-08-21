@@ -451,9 +451,11 @@ export async function startHttpTransport(
           const serverAddress = `http://${HTTP_HOST}:${currentPort}${MCP_ENDPOINT_PATH}`;
           logger.info(`HTTP transport successfully listening at ${serverAddress}`);
           
-          if (process.stdout.isTTY) {
-            console.log(`\n🚀 MCP Server running in HTTP mode at: ${serverAddress}\n   (MCP Spec: 2025-03-26 Streamable HTTP Transport)\n`);
-          }
+          // Unconditional. Only the HTTP transport reaches this line, so stdout is
+          // never the JSON-RPC channel here (that belongs to the stdio transport).
+          // Under a service manager this line is the proof-of-life that the capture
+          // file lacked for this service's entire history.
+          console.log(`\n🚀 MCP Server running in HTTP mode at: ${serverAddress}\n   (MCP Spec: 2025-03-26 Streamable HTTP Transport)\n`);
           resolve();
         });
         server.on("error", reject);
