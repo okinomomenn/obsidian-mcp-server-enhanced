@@ -119,6 +119,14 @@ const EnvSchema = z.object({
     .string()
     .transform((val) => val.toLowerCase() === "true")
     .default("false"),
+  /**
+   * SQLite file backing DCR clients, refresh tokens and authorization codes.
+   * Deliberately NOT routed through ensureDirectory: in production this lives
+   * outside the project tree (a data volume), which ensureDirectory forbids.
+   */
+  MCP_OAUTH_DB_PATH: z
+    .string()
+    .default(path.join(projectRoot, "data", "oauth.db")),
   // --- MCP Authentication (for multi-vault support) ---
   MCP_AUTH_KEY: z.string().min(1, "MCP_AUTH_KEY cannot be empty").optional(),
   // --- Multi-vault configuration ---
@@ -321,6 +329,7 @@ export const config = {
   mcpOauthRefreshTokenTtlSec: env.MCP_OAUTH_REFRESH_TOKEN_TTL_SEC,
   mcpOauthCodeTtlSec: env.MCP_OAUTH_CODE_TTL_SEC,
   mcpOauthAutoApprove: env.MCP_OAUTH_AUTO_APPROVE,
+  mcpOauthDbPath: env.MCP_OAUTH_DB_PATH,
   // --- MCP Authentication ---
   mcpAuthKey: mcpAuthKey!,
   // --- Vault Configuration ---

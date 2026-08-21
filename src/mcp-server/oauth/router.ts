@@ -11,6 +11,7 @@ import { URL } from "url";
 import { config } from "../../config/index.js";
 import { logger, requestContextService } from "../../utils/index.js";
 import { handleAuthorize } from "./authorize.js";
+import { configureDatabasePath } from "./db.js";
 import { authorizationServerMetadata, protectedResourceMetadata } from "./metadata.js";
 import { handleRegister } from "./register.js";
 import { handleToken } from "./token.js";
@@ -148,6 +149,10 @@ export function buildOAuthDepsFromConfig(mcpEndpointPath: string): OAuthRouterDe
   if (!secret) {
     throw new Error("MCP_AUTH_SECRET_KEY (≥32 chars) is required when MCP_AUTH_MODE=oauth");
   }
+  // Composition root for the store layer: db.ts deliberately does not import
+  // config (that module has import-time side effects and must stay out of unit
+  // tests). Opening is still lazy — this only records the path.
+  configureDatabasePath(config.mcpOauthDbPath);
   return {
     issuerUrl: issuer.replace(/\/+$/, ""),
     mcpEndpointPath,

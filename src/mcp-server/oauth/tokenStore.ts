@@ -1,17 +1,64 @@
 /**
  * @fileoverview Token issuance & verification.
- *   - Access tokens: self-contained HS256 JWTs (jose). No DB lookup at verify time.
- *   - Refresh tokens: opaque random strings stored in-memory, rotated on use (OAuth 2.1 MUST for public clients).
- *   - Authorization codes: in-memory, single-use, short-lived.
+ *   - Access tokens: self-contained HS256 JWTs (jose). No DB lookup at verify time,
+ *     so they already survive a restart on their own — nothing is persisted here.
+ *   - Refresh tokens: opaque random strings persisted in SQLite (v1.1), rotated on
+ *     use (OAuth 2.1 MUST for public clients).
+ *   - Authorization codes: persisted, single-use, short-lived.
+ *
+ * TIME UNITS: `expiresAt` / `expires_at` are epoch **milliseconds** (Date.now()).
+ * The JWT layer is the only place that speaks seconds, and it converts locally in
+ * issueAccessToken. Do not let seconds leak into the store.
  */
 
 import { randomBytes, randomUUID } from "node:crypto";
 import { SignJWT, jwtVerify } from "jose";
+import { getDb } from "./db.js";
 import type { AccessTokenClaims, AuthorizationCode, RefreshToken } from "./types.js";
 import { OAuthError } from "./types.js";
 
-const codes = new Map<string, AuthorizationCode>();
-const refreshTokens = new Map<string, RefreshToken>();
+interface CodeRow {
+  code: string;
+  client_id: string;
+  redirect_uri: string;
+  code_challenge: string;
+  resource: string;
+  scope: string;
+  expires_at: number;
+  consumed: number;
+}
+
+interface RefreshRow {
+  token: string;
+  client_id: string;
+  resource: string;
+  scope: string;
+  expires_at: number;
+}
+
+function toCode(row: CodeRow): AuthorizationCode {
+  return {
+    code: row.code,
+    clientId: row.client_id,
+    redirectUri: row.redirect_uri,
+    codeChallenge: row.code_challenge,
+    resource: row.resource,
+    scope: row.scope,
+    expiresAt: row.expires_at,
+    // SQLite has no boolean type; the column is INTEGER 0/1.
+    consumed: row.consumed !== 0,
+  };
+}
+
+function toRefresh(row: RefreshRow): RefreshToken {
+  return {
+    token: row.token,
+    clientId: row.client_id,
+    resource: row.resource,
+    scope: row.scope,
+    expiresAt: row.expires_at,
+  };
+}
 
 function secretKey(secret: string): Uint8Array {
   return new TextEncoder().encode(secret);
@@ -37,14 +84,32 @@ export function issueCode(input: {
     expiresAt: Date.now() + input.ttlSec * 1000,
     consumed: false,
   };
-  codes.set(code.code, code);
+  getDb()
+    .prepare(
+      `INSERT INTO codes
+         (code, client_id, redirect_uri, code_challenge, resource, scope, expires_at, consumed)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 0)`,
+    )
+    .run(
+      code.code,
+      code.clientId,
+      code.redirectUri,
+      code.codeChallenge,
+      code.resource,
+      code.scope,
+      code.expiresAt,
+    );
   return code;
 }
 
 /** Single-use: returns code only if unconsumed and unexpired, then marks consumed. */
 export function consumeCode(value: string): AuthorizationCode {
-  const code = codes.get(value);
-  if (!code) throw new OAuthError("invalid_grant", "authorization code unknown", 400);
+  const db = getDb();
+  const row = db.prepare(`SELECT * FROM codes WHERE code = ?`).get(value) as
+    | CodeRow
+    | undefined;
+  if (!row) throw new OAuthError("invalid_grant", "authorization code unknown", 400);
+  const code = toCode(row);
   if (code.consumed) {
     // Per RFC 6749 §10.5: detected reuse means earlier issuance was compromised.
     // Revoke all refresh tokens issued under this client_id to limit blast radius.
@@ -52,9 +117,10 @@ export function consumeCode(value: string): AuthorizationCode {
     throw new OAuthError("invalid_grant", "authorization code already used", 400);
   }
   if (Date.now() > code.expiresAt) {
-    codes.delete(value);
+    db.prepare(`DELETE FROM codes WHERE code = ?`).run(value);
     throw new OAuthError("invalid_grant", "authorization code expired", 400);
   }
+  db.prepare(`UPDATE codes SET consumed = 1 WHERE code = ?`).run(value);
   code.consumed = true;
   return code;
 }
@@ -119,30 +185,38 @@ export function issueRefreshToken(input: {
     scope: input.scope,
     expiresAt: Date.now() + input.ttlSec * 1000,
   };
-  refreshTokens.set(rt.token, rt);
+  getDb()
+    .prepare(
+      `INSERT INTO refresh_tokens (token, client_id, resource, scope, expires_at)
+       VALUES (?, ?, ?, ?, ?)`,
+    )
+    .run(rt.token, rt.clientId, rt.resource, rt.scope, rt.expiresAt);
   return rt;
 }
 
 /** Rotation: invalidate the presented refresh token and return its metadata for re-issue. */
 export function rotateRefreshToken(value: string, clientId: string): RefreshToken {
-  const rt = refreshTokens.get(value);
-  if (!rt) throw new OAuthError("invalid_grant", "refresh token unknown", 400);
+  const db = getDb();
+  const row = db.prepare(`SELECT * FROM refresh_tokens WHERE token = ?`).get(value) as
+    | RefreshRow
+    | undefined;
+  if (!row) throw new OAuthError("invalid_grant", "refresh token unknown", 400);
+  const rt = toRefresh(row);
+  const del = db.prepare(`DELETE FROM refresh_tokens WHERE token = ?`);
   if (rt.clientId !== clientId) {
-    refreshTokens.delete(value);
+    del.run(value);
     throw new OAuthError("invalid_grant", "refresh token bound to different client", 400);
   }
   if (Date.now() > rt.expiresAt) {
-    refreshTokens.delete(value);
+    del.run(value);
     throw new OAuthError("invalid_grant", "refresh token expired", 400);
   }
-  refreshTokens.delete(value);
+  del.run(value);
   return rt;
 }
 
 function revokeAllRefreshTokensForClient(clientId: string): void {
-  for (const [k, v] of refreshTokens) {
-    if (v.clientId === clientId) refreshTokens.delete(k);
-  }
+  getDb().prepare(`DELETE FROM refresh_tokens WHERE client_id = ?`).run(clientId);
 }
 
 /* ---------- Background GC ---------- */
@@ -150,16 +224,21 @@ function revokeAllRefreshTokensForClient(clientId: string): void {
 export function startTokenStoreGc(intervalMs = 60_000): NodeJS.Timeout {
   return setInterval(() => {
     const now = Date.now();
-    for (const [k, v] of codes) if (v.expiresAt < now) codes.delete(k);
-    for (const [k, v] of refreshTokens) if (v.expiresAt < now) refreshTokens.delete(k);
+    const db = getDb();
+    db.prepare(`DELETE FROM codes WHERE expires_at < ?`).run(now);
+    db.prepare(`DELETE FROM refresh_tokens WHERE expires_at < ?`).run(now);
   }, intervalMs);
 }
 
 /** Test-only helpers. */
 export function _resetTokenStore(): void {
-  codes.clear();
-  refreshTokens.clear();
+  const db = getDb();
+  db.exec(`DELETE FROM codes`);
+  db.exec(`DELETE FROM refresh_tokens`);
 }
 export function _peekCode(value: string): AuthorizationCode | undefined {
-  return codes.get(value);
+  const row = getDb().prepare(`SELECT * FROM codes WHERE code = ?`).get(value) as
+    | CodeRow
+    | undefined;
+  return row ? toCode(row) : undefined;
 }
