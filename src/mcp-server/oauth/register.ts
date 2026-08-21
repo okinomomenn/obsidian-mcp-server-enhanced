@@ -28,7 +28,22 @@ export async function handleRegister(
     throw new OAuthError("invalid_request", "register requires POST", 405);
   }
 
-  const body = await parseJsonBody();
+  // A malformed JSON body raises SyntaxError out of parseJsonBody. Left unhandled
+  // it reached the router's generic catch and was reported as 500 server_error,
+  // which points the caller at the server when the fault is in their request —
+  // that misdirection has already cost one live misdiagnosis. RFC 7591 §3.2.2
+  // calls for invalid_client_metadata with 400.
+  let body: unknown;
+  try {
+    body = await parseJsonBody();
+  } catch (err) {
+    throw new OAuthError(
+      "invalid_client_metadata",
+      `request body is not valid JSON: ${err instanceof Error ? err.message : String(err)}`,
+      400,
+    );
+  }
+
   const parsed = RegisterRequestSchema.safeParse(body);
   if (!parsed.success) {
     throw new OAuthError(

@@ -108,7 +108,7 @@ export const TokenRefreshRequestSchema = z.object({
 });
 export type TokenRefreshRequest = z.infer<typeof TokenRefreshRequestSchema>;
 
-/** RFC 6749 §5.2 standard error codes used by this server. */
+/** RFC 6749 §5.2 standard error codes used by this server, plus RFC 7591 §3.2.2. */
 export type OAuthErrorCode =
   | "invalid_request"
   | "invalid_client"
@@ -119,7 +119,9 @@ export type OAuthErrorCode =
   | "access_denied"
   | "server_error"
   | "invalid_token"
-  | "insufficient_scope";
+  | "insufficient_scope"
+  /** RFC 7591 §3.2.2 — registration-specific; the submitted metadata is unusable. */
+  | "invalid_client_metadata";
 
 export class OAuthError extends Error {
   constructor(

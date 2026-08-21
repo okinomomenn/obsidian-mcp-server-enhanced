@@ -10,7 +10,10 @@
 
 import assert from "node:assert/strict";
 import { createHash, randomBytes } from "node:crypto";
-import { afterEach, describe, it } from "node:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import nodePath from "node:path";
+import { after, afterEach, describe, it } from "node:test";
 
 import { verifyS256Challenge } from "../pkce.js";
 import {
@@ -35,6 +38,8 @@ import {
   rotateRefreshToken,
   verifyAccessToken,
 } from "../tokenStore.js";
+import { _closeDatabase, _useDatabaseAt, getDb } from "../db.js";
+import { handleRegister } from "../register.js";
 import {
   AuthorizeRequestSchema,
   OAuthError,
@@ -47,6 +52,19 @@ const SECRET = "x".repeat(48);
 const ISSUER = "https://example.test";
 const AUDIENCE = "https://example.test/mcp";
 const RESOURCE = AUDIENCE;
+
+/**
+ * The stores are SQLite-backed as of v1.1. Point them at a throwaway file before
+ * any test runs — module-level so it happens at import time, ahead of the suites.
+ */
+const TMP_DIR = mkdtempSync(nodePath.join(tmpdir(), "obsmcp-oauth-test-"));
+const DB_FILE = nodePath.join(TMP_DIR, "oauth.db");
+_useDatabaseAt(DB_FILE);
+
+after(() => {
+  _closeDatabase();
+  rmSync(TMP_DIR, { recursive: true, force: true });
+});
 
 afterEach(() => {
   _resetClientStore();
@@ -399,5 +417,146 @@ describe("schemas — request body validation", () => {
       }).success,
       false,
     );
+  });
+});
+
+/**
+ * The reason this feature exists. Before v1.1 the stores were process-local Maps,
+ * so a restart destroyed every registration and refresh token. Closing the handle
+ * and reopening the same file is a faithful stand-in for a process restart: the
+ * module state is rebuilt from disk exactly as it would be on boot.
+ */
+describe("persistence across a restart", () => {
+  it("keeps a DCR client, and its client_id is unchanged", () => {
+    const before = createClient({
+      clientName: "Restart Survivor",
+      redirectUris: ["https://app.test/cb"],
+    });
+
+    _closeDatabase();
+    _useDatabaseAt(DB_FILE);
+
+    const after_ = getClient(before.clientId);
+    assert.ok(after_, "client vanished across restart");
+    assert.equal(after_.clientId, before.clientId);
+    assert.equal(after_.clientName, "Restart Survivor");
+    assert.deepEqual(after_.redirectUris, ["https://app.test/cb"]);
+    assert.equal(after_.createdAt, before.createdAt);
+  });
+
+  it("keeps a refresh token usable, so no re-consent is needed", () => {
+    const c = createClient({ redirectUris: ["https://app.test/cb"] });
+    const rt = issueRefreshToken({
+      clientId: c.clientId,
+      resource: RESOURCE,
+      scope: "mcp",
+      ttlSec: 3600,
+    });
+
+    _closeDatabase();
+    _useDatabaseAt(DB_FILE);
+
+    const rotated = rotateRefreshToken(rt.token, c.clientId);
+    assert.equal(rotated.clientId, c.clientId);
+    assert.equal(rotated.resource, RESOURCE);
+    // Rotation is single-use: the same token must not survive a second exchange.
+    assert.throws(
+      () => rotateRefreshToken(rt.token, c.clientId),
+      (e: unknown) => e instanceof OAuthError && e.code === "invalid_grant",
+    );
+  });
+
+  it("keeps an authorization code, including its consumed flag", () => {
+    const c = createClient({ redirectUris: ["https://app.test/cb"] });
+    const code = issueCode({
+      clientId: c.clientId,
+      redirectUri: "https://app.test/cb",
+      codeChallenge: "a".repeat(43),
+      resource: RESOURCE,
+      scope: "mcp",
+      ttlSec: 600,
+    });
+    consumeCode(code.code);
+
+    _closeDatabase();
+    _useDatabaseAt(DB_FILE);
+
+    // Replay protection must not be forgotten by a restart.
+    assert.throws(
+      () => consumeCode(code.code),
+      (e: unknown) => e instanceof OAuthError && e.code === "invalid_grant",
+    );
+  });
+
+  it("rejects a NULL primary key (TEXT PRIMARY KEY alone would not)", () => {
+    const db = getDb();
+    assert.throws(() =>
+      db
+        .prepare(
+          `INSERT INTO clients
+             (client_id, client_name, redirect_uris, created_at, token_endpoint_auth_method, source)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+        )
+        .run(null, "n", "[]", Date.now(), "none", "dcr"),
+    );
+  });
+});
+
+/** Minimal ServerResponse stand-in — handleRegister only needs writeHead/end. */
+function mockRes() {
+  const captured: { status?: number; body?: string } = {};
+  return {
+    res: {
+      writeHead(status: number) {
+        captured.status = status;
+        return this;
+      },
+      end(body?: string) {
+        captured.body = body;
+        return this;
+      },
+    } as unknown as import("http").ServerResponse,
+    captured,
+  };
+}
+
+const postReq = { method: "POST" } as import("http").IncomingMessage;
+
+describe("register — malformed body handling", () => {
+  it("maps invalid JSON to 400 invalid_client_metadata, not 500", async () => {
+    const { res } = mockRes();
+    // parseJsonBody raises SyntaxError for a malformed body; previously this
+    // escaped to the router's generic catch and surfaced as 500 server_error,
+    // pointing the caller at the server when the fault was in the request.
+    const parseJsonBody = () =>
+      Promise.reject(new SyntaxError("Unexpected token } in JSON at position 4"));
+
+    await assert.rejects(
+      handleRegister(postReq, res, parseJsonBody),
+      (e: unknown) =>
+        e instanceof OAuthError &&
+        e.code === "invalid_client_metadata" &&
+        e.httpStatus === 400,
+    );
+  });
+
+  it("still registers a well-formed body (no regression)", async () => {
+    const { res, captured } = mockRes();
+    const parseJsonBody = () =>
+      Promise.resolve({
+        redirect_uris: ["https://app.test/cb"],
+        client_name: "Good Client",
+      });
+
+    await handleRegister(postReq, res, parseJsonBody);
+
+    assert.equal(captured.status, 201);
+    const payload = JSON.parse(captured.body ?? "{}");
+    assert.match(payload.client_id, /^[0-9a-f-]{36}$/);
+    assert.equal(payload.client_name, "Good Client");
+    assert.deepEqual(payload.redirect_uris, ["https://app.test/cb"]);
+    assert.equal(payload.token_endpoint_auth_method, "none");
+    // And it is actually persisted, not just echoed back.
+    assert.equal(getClient(payload.client_id)?.clientName, "Good Client");
   });
 });
