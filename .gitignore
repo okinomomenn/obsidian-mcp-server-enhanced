@@ -174,3 +174,9 @@ test-*.js
 
 # Agent harness local state (per-checkout, never shared)
 .claude/
+
+# Local OAuth store (default MCP_OAUTH_DB_PATH); production keeps this on a data volume
+data/
+*.db
+*.db-wal
+*.db-shm
