@@ -40,6 +40,12 @@ const SESSION_GC_INTERVAL_MS = 60 * 1000; // 1 minute
 const MAX_PORT_RETRIES = 15;
 
 /**
+ * Monotonic counter for the response-leg log (see `McpResponseClosed`).
+ * Resets on process start; pair it with the process uptime when reading logs.
+ */
+let httpRequestSeq = 0;
+
+/**
  * Checks if a port is in use.
  */
 async function isPortInUse(port: number, host: string): Promise<boolean> {
@@ -197,11 +203,60 @@ export async function startHttpTransport(
   }, SESSION_GC_INTERVAL_MS);
 
   const server = http.createServer(async (req, res) => {
+    // --- Response-leg instrumentation (log-only; adds no behaviour) ---
+    // Records how each /mcp response ended: status, latency, whether the body was
+    // handed to the OS in full (`finished`), and whether the socket closed before
+    // that (`clientAborted`). A `clientAborted: true` line is the machine-side
+    // evidence that the return leg was cut before the response was delivered.
+    // Listeners are attached before anything else so no request can escape them.
+    const respRec: {
+      seq: number;
+      start: number;
+      path: string;
+      rpcMethod?: string;
+      tool?: string;
+      finishMs?: number;
+      logged: boolean;
+    } = {
+      seq: ++httpRequestSeq,
+      start: Date.now(),
+      path: "",
+      logged: false,
+    };
+    res.on("finish", () => {
+      respRec.finishMs = Date.now() - respRec.start;
+    });
+    res.on("close", () => {
+      if (respRec.logged) return;
+      respRec.logged = true;
+      // Only the MCP endpoint is logged; health pollers on other paths would
+      // otherwise add thousands of lines a day to a fixed-size rotation.
+      if (respRec.path !== MCP_ENDPOINT_PATH) return;
+      const finished = res.writableFinished === true;
+      logger.info(
+        `MCP response closed: ${req.method} ${respRec.path} ${res.statusCode}`,
+        requestContextService.createRequestContext({
+          operation: "McpResponseClosed",
+          reqSeq: respRec.seq,
+          path: respRec.path,
+          httpMethod: req.method || "unknown",
+          rpcMethod: respRec.rpcMethod,
+          tool: respRec.tool,
+          status: res.statusCode,
+          ms: Date.now() - respRec.start,
+          finishMs: respRec.finishMs ?? null,
+          finished,
+          clientAborted: !finished,
+        }),
+      );
+    });
+
     try {
       setCorsHeaders(res);
 
       const url = new URL(req.url!, `http://${req.headers.host}`);
-      
+      respRec.path = url.pathname;
+
       // Log all incoming requests for debugging
       const requestContext = requestContextService.createRequestContext({
         operation: "IncomingHTTPRequest",
@@ -298,7 +353,11 @@ export async function startHttpTransport(
 
       if (req.method === "POST") {
         const body = await parseJsonBody(req);
-        
+        respRec.rpcMethod =
+          typeof body?.method === "string" ? body.method : undefined;
+        respRec.tool =
+          typeof body?.params?.name === "string" ? body.params.name : undefined;
+
         // Log POST body for debugging (without sensitive data)
         logger.debug(`POST request body`, {
           ...requestContext,
