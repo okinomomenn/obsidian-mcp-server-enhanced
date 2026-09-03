@@ -8,7 +8,10 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import http from "http";
 import { randomUUID } from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
 import { URL } from "url";
+import winston from "winston";
 import { config } from "../../config/index.js";
 import {
   logger,
@@ -44,6 +47,99 @@ const MAX_PORT_RETRIES = 15;
  * Resets on process start; pair it with the process uptime when reading logs.
  */
 let httpRequestSeq = 0;
+
+/** Dedicated sink for return-leg evidence. See `attachEvidenceChannel`. */
+const EVIDENCE_FILENAME = "funnel-evidence.log";
+const EVIDENCE_MAX_SIZE = 5 * 1024 * 1024; // 5MB
+const EVIDENCE_MAX_FILES = 10;
+
+/**
+ * Reads the git HEAD SHA of the checkout this build came from, walking up from
+ * `startDir`. Best effort: returns "unknown" when there is no .git nearby (a
+ * copied tree, an npm install), which is itself worth recording.
+ */
+function readGitHeadSha(startDir: string): string {
+  try {
+    let dir = startDir;
+    for (let i = 0; i < 5; i++) {
+      const gitDir = path.join(dir, ".git");
+      if (fs.existsSync(gitDir)) {
+        const head = fs.readFileSync(path.join(gitDir, "HEAD"), "utf8").trim();
+        if (!head.startsWith("ref: ")) {
+          return head; // detached HEAD holds the SHA directly
+        }
+        const ref = head.slice(5).trim();
+        const looseRef = path.join(gitDir, ref);
+        if (fs.existsSync(looseRef)) {
+          return fs.readFileSync(looseRef, "utf8").trim();
+        }
+        const packedRefs = path.join(gitDir, "packed-refs");
+        if (fs.existsSync(packedRefs)) {
+          for (const line of fs
+            .readFileSync(packedRefs, "utf8")
+            .split("\n")) {
+            const [sha, name] = line.trim().split(" ");
+            if (name === ref && sha) return sha;
+          }
+        }
+        return "unknown";
+      }
+      const parent = path.dirname(dir);
+      if (parent === dir) break;
+      dir = parent;
+    }
+  } catch {
+    // A missing or unreadable .git is not worth failing a server start over.
+  }
+  return "unknown";
+}
+
+/**
+ * Opens the funnel evidence channel: a second file transport on the shared
+ * logger that keeps only two kinds of record.
+ *
+ *   1. `McpResponseClosed` where the response was a POST that closed before it
+ *      was written out — the machine-side proof that the return leg was cut.
+ *   2. One `McpTransportStarted` marker per process start.
+ *
+ * The marker is what makes an empty file readable. Without it, "no evidence
+ * lines" and "the process restarted and lost its history" look identical.
+ *
+ * The main log is untouched: same rotation, same lines, same volume. This file
+ * only ever receives what the filter below admits, which under healthy
+ * operation is one line per restart.
+ */
+function attachEvidenceChannel(): string | null {
+  if (!config.logsPath) return null;
+
+  const evidenceFilter = winston.format((info) => {
+    if (info.operation === "McpTransportStarted") return info;
+    if (
+      info.operation === "McpResponseClosed" &&
+      info.httpMethod === "POST" &&
+      info.clientAborted === true
+    ) {
+      return info;
+    }
+    return false;
+  });
+
+  const filename = path.join(config.logsPath, EVIDENCE_FILENAME);
+  const attached = logger.addTransport(
+    new winston.transports.File({
+      filename,
+      format: winston.format.combine(
+        evidenceFilter(),
+        winston.format.timestamp(),
+        winston.format.json(),
+      ),
+      maxsize: EVIDENCE_MAX_SIZE,
+      maxFiles: EVIDENCE_MAX_FILES,
+      tailable: true,
+    }),
+  );
+  return attached ? filename : null;
+}
 
 /**
  * Checks if a port is in use.
@@ -172,6 +268,8 @@ export async function startHttpTransport(
     transportType: "HTTP",
     component: "HttpTransportSetup",
   });
+
+  const evidenceFile = attachEvidenceChannel();
 
   // --- OAuth shim setup (only when MCP_AUTH_MODE=oauth) ---
   let oauthDeps: OAuthRouterDeps | undefined;
@@ -515,6 +613,21 @@ export async function startHttpTransport(
           // Under a service manager this line is the proof-of-life that the capture
           // file lacked for this service's entire history.
           console.log(`\n🚀 MCP Server running in HTTP mode at: ${serverAddress}\n   (MCP Spec: 2025-03-26 Streamable HTTP Transport)\n`);
+
+          // Marker on the evidence channel. An evidence file holding only these
+          // is proof of health; a gap in them dates a restart, which is the one
+          // thing that can silently erase the counter and the session state.
+          logger.info(
+            `MCP HTTP transport started (pid ${process.pid})`,
+            requestContextService.createRequestContext({
+              operation: "McpTransportStarted",
+              pid: process.pid,
+              startedAt: new Date().toISOString(),
+              gitHead: readGitHeadSha(path.dirname(config.logsPath)),
+              port: currentPort,
+              evidenceFile: evidenceFile ?? "disabled",
+            }),
+          );
           resolve();
         });
         server.on("error", reject);
