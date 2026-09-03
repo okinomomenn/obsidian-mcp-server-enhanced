@@ -335,6 +335,30 @@ export class Logger {
   }
 
   /**
+   * Attaches an extra transport to the shared Winston logger.
+   *
+   * Exists so a caller can open a dedicated, narrowly filtered sink without the
+   * policy for that sink (what it keeps, where it writes, how it rotates) living
+   * here. The HTTP transport uses it for the funnel evidence channel: aborted
+   * responses are rare, and the main log's 5 x 5MB ring discards roughly a
+   * day's worth of them, so the evidence needs a file of its own.
+   *
+   * Note the ordering constraint: Winston filters by the logger's own level
+   * before a message reaches any transport. A transport added here can never
+   * see records below the current level.
+   *
+   * @param transport - The Winston transport to add.
+   * @returns True if attached; false if the logger is not initialized yet.
+   */
+  public addTransport(transport: TransportStream): boolean {
+    if (!this.winstonLogger) {
+      return false;
+    }
+    this.winstonLogger.add(transport);
+    return true;
+  }
+
+  /**
    * Configures the console transport based on the current log level and TTY status.
    * Adds or removes the console transport as needed.
    * @returns {{ enabled: boolean, message: string | null }} Status of console logging.
