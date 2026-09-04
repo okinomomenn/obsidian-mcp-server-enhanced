@@ -48,6 +48,49 @@ const MAX_PORT_RETRIES = 15;
  */
 let httpRequestSeq = 0;
 
+/**
+ * Argument keys that name the vault object a tool call acts on, in the order
+ * they are preferred. Only path-like keys are read: free text (`query`,
+ * `content`, `text`) never reaches the evidence log.
+ */
+const TARGET_ARG_KEYS = [
+  "targetIdentifier",
+  "filePath",
+  "dirPath",
+  "path",
+  "templatePath",
+  "targetPath",
+] as const;
+
+/** Longer targets are truncated; a vault path never legitimately runs this far. */
+const TARGET_MAX_LENGTH = 300;
+
+/**
+ * Pulls the target out of a JSON-RPC body so a cut return leg can be matched
+ * back to the request that was lost. `tool` alone says which tool ran; this
+ * says what it ran on, which is what turns a guess into a comparison.
+ *
+ * Returns `null` when the body names no target — a non-`tools/call` method, a
+ * tool that takes no path, or a body that never parsed.
+ */
+function extractTargetIdentifier(body: unknown): string | null {
+  const args = (body as { params?: { arguments?: unknown } } | undefined)
+    ?.params?.arguments;
+  if (!args || typeof args !== "object") return null;
+  const record = args as Record<string, unknown>;
+  for (const key of TARGET_ARG_KEYS) {
+    const value = record[key];
+    // An empty string is a real argument (list_files uses "" for the vault
+    // root), so presence and type decide — not truthiness.
+    if (typeof value === "string") {
+      return value.length > TARGET_MAX_LENGTH
+        ? `${value.slice(0, TARGET_MAX_LENGTH)}…`
+        : value;
+    }
+  }
+  return null;
+}
+
 /** Dedicated sink for return-leg evidence. See `attachEvidenceChannel`. */
 const EVIDENCE_FILENAME = "funnel-evidence.log";
 const EVIDENCE_MAX_SIZE = 5 * 1024 * 1024; // 5MB
@@ -306,6 +349,8 @@ export async function startHttpTransport(
     // handed to the OS in full (`finished`), and whether the socket closed before
     // that (`clientAborted`). A `clientAborted: true` line is the machine-side
     // evidence that the return leg was cut before the response was delivered.
+    // `targetIdentifier` carries what the call acted on, so a cut line can be
+    // compared against the request that was lost instead of merely guessed at.
     // Listeners are attached before anything else so no request can escape them.
     const respRec: {
       seq: number;
@@ -313,12 +358,14 @@ export async function startHttpTransport(
       path: string;
       rpcMethod?: string;
       tool?: string;
+      targetIdentifier: string | null;
       finishMs?: number;
       logged: boolean;
     } = {
       seq: ++httpRequestSeq,
       start: Date.now(),
       path: "",
+      targetIdentifier: null,
       logged: false,
     };
     res.on("finish", () => {
@@ -340,6 +387,7 @@ export async function startHttpTransport(
           httpMethod: req.method || "unknown",
           rpcMethod: respRec.rpcMethod,
           tool: respRec.tool,
+          targetIdentifier: respRec.targetIdentifier,
           status: res.statusCode,
           ms: Date.now() - respRec.start,
           finishMs: respRec.finishMs ?? null,
@@ -455,6 +503,7 @@ export async function startHttpTransport(
           typeof body?.method === "string" ? body.method : undefined;
         respRec.tool =
           typeof body?.params?.name === "string" ? body.params.name : undefined;
+        respRec.targetIdentifier = extractTargetIdentifier(body);
 
         // Log POST body for debugging (without sensitive data)
         logger.debug(`POST request body`, {
