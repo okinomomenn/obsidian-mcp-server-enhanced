@@ -161,7 +161,11 @@ export class Logger {
 
   private readonly MCP_NOTIFICATION_STACK_TRACE_MAX_LENGTH = 1024;
   private readonly LOG_FILE_MAX_SIZE = 5 * 1024 * 1024; // 5MB
-  private readonly LOG_MAX_FILES = 5;
+  // Rotation is driven by volume, not time: at 5 files a busy day evicted a
+  // generation in ~1.2h and the whole window covered only ~26h, which lost
+  // incident samples before they could be read. 30 keeps roughly 6.5 days
+  // (5MB x 30 = 150MB per level).
+  private readonly LOG_MAX_FILES = 30;
 
   /** @private */
   private constructor() {}
