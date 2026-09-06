@@ -97,6 +97,15 @@ const EVIDENCE_MAX_SIZE = 5 * 1024 * 1024; // 5MB
 const EVIDENCE_MAX_FILES = 10;
 
 /**
+ * One-shot latch for the header-name diagnostic emitted on the first
+ * `tools/call` after startup. The incoming-request log records a fixed
+ * allow-list of four headers, so it cannot answer whether a client-side
+ * request id reaches this server at all. Logging the header NAMES once
+ * answers that without ever exposing a value.
+ */
+let headerNamesLogged = false;
+
+/**
  * Reads the git HEAD SHA of the checkout this build came from, walking up from
  * `startDir`. Best effort: returns "unknown" when there is no .git nearby (a
  * copied tree, an npm install), which is itself worth recording.
@@ -504,6 +513,19 @@ export async function startHttpTransport(
         respRec.tool =
           typeof body?.params?.name === "string" ? body.params.name : undefined;
         respRec.targetIdentifier = extractTargetIdentifier(body);
+
+        // One-shot: record which header NAMES a real tool call carries, so we
+        // can tell whether a client-side request id (x-request-id or similar)
+        // ever reaches us. Names only — values are never read or logged, which
+        // keeps Authorization and any session token out of the log entirely.
+        if (!headerNamesLogged && respRec.rpcMethod === "tools/call") {
+          headerNamesLogged = true;
+          logger.info(`Incoming header names on first tools/call`, {
+            ...requestContext,
+            operation: "IncomingHeaderNames",
+            headerNames: Object.keys(req.headers).sort(),
+          });
+        }
 
         // Log POST body for debugging (without sensitive data)
         logger.debug(`POST request body`, {
