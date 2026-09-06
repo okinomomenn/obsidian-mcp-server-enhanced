@@ -125,16 +125,19 @@ const ObsidianUpdateFileRegistrationSchema = z
       .string()
       .optional()
       .describe(
-        "Identifier for 'filePath' (path) or 'periodicNote' (period). Not used for 'activeFile'.",
+        "【必須（targetType が filePath / periodicNote のとき）】Identifier for 'filePath' (path) or 'periodicNote' (period). Not used for 'activeFile'.",
       ),
     /** Determines the modification strategy: must be 'wholeFile'. */
     modificationType: ModificationTypeSchema,
 
-    // --- WholeFile Mode Parameters (Marked optional here, refined schema enforces if modificationType is 'wholeFile') ---
-    /** For 'wholeFile' mode: 'append', 'prepend', or 'overwrite'. Required if modificationType is 'wholeFile'. */
-    wholeFileMode: WholeFileModeSchema.optional() // Made optional here, refined schema handles requirement
+    // --- WholeFile Mode Parameters ---
+    /** For 'wholeFile' mode: 'append', 'prepend', or 'overwrite'. Always required. */
+    // Unconditionally required: `modificationType` is a literal 'wholeFile', so the refined
+    // schema (ObsidianUpdateFileInputSchema) always demands this field. Declared non-optional
+    // here so the emitted JSON Schema `required` array says the same thing.
+    wholeFileMode: WholeFileModeSchema
       .describe(
-        "For 'wholeFile' mode: 'append', 'prepend', or 'overwrite'. Required if modificationType is 'wholeFile'.",
+        "For 'wholeFile' mode: 'append', 'prepend', or 'overwrite'. Always required (modificationType is always 'wholeFile').",
       ),
     /** For 'wholeFile' mode: If true (default), creates the target file/note if it doesn't exist before modifying. If false, fails if the target doesn't exist. */
     createIfNeeded: z

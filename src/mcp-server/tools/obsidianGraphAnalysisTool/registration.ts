@@ -41,11 +41,11 @@ Helps identify knowledge gaps, content clusters, and navigation patterns.`,
       },
       filePath: {
         type: "string",
-        description: "Path to the target note (required for note-specific operations)",
+        description: "【必須（operation が get_note_links / get_backlinks / trace_connection_path のとき）】Path to the target note",
       },
       targetNote: {
         type: "string", 
-        description: "Target note path for path tracing operations",
+        description: "【必須（operation が trace_connection_path のとき）】Target note path for path tracing operations",
       },
       minConnections: {
         type: "number",

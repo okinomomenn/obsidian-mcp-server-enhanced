@@ -24,8 +24,10 @@ const SmartLinkingArgsSchema = z.object({
     "find_broken_links",
     "get_link_suggestions"
   ]),
-  filePath: z.string().optional(),
-  content: z.string().optional(),
+  filePath: z.string().optional()
+    .describe("【必須（operation が find_link_opportunities / suggest_backlinks / find_broken_links のとき。suggest_links_for_content / analyze_linkable_concepts / recommend_tags / get_link_suggestions では filePath か content のいずれかが必須）】Path to the target note"),
+  content: z.string().optional()
+    .describe("【必須（operation が suggest_links_for_content / analyze_linkable_concepts / recommend_tags / get_link_suggestions で filePath を渡さないとき）】Text content to analyze for link suggestions (alternative to filePath)"),
   maxSuggestions: z.number().min(1).max(50).default(10),
   similarityThreshold: z.number().min(0.1).max(1.0).default(0.3),
   includeExistingLinks: z.boolean().default(false),

@@ -17,10 +17,13 @@ import { executeBlockReferenceOperation, BlockReferenceOperation } from "./logic
 const BlockReferenceArgsSchema = z.object({
   operation: z.enum(["insert_under_heading", "create_block_reference", "get_heading_content", "list_headings", "get_block_content", "append_to_heading", "prepend_to_heading"]),
   filePath: z.string().min(1, "File path is required"),
-  heading: z.string().optional(),
+  heading: z.string().optional()
+    .describe("【必須（operation が insert_under_heading / get_heading_content / append_to_heading / prepend_to_heading のとき）】Heading name to target"),
   headingLevel: z.number().min(1).max(6).optional(),
-  content: z.string().optional(),
-  blockId: z.string().optional(),
+  content: z.string().optional()
+    .describe("【必須（operation が insert_under_heading / append_to_heading / prepend_to_heading / create_block_reference のとき）】Content to insert, append, or prepend"),
+  blockId: z.string().optional()
+    .describe("【必須（operation が get_block_content / create_block_reference のとき）】Block ID for block reference operations (without ^)"),
   position: z.enum(["start", "end", "after_heading", "before_next_heading"]).default("end"),
   createHeading: z.boolean().default(false),
   includeSubheadings: z.boolean().default(false),

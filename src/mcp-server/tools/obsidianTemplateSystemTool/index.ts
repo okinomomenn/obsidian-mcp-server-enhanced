@@ -23,8 +23,10 @@ const TemplateSystemArgsSchema = z.object({
     "validate_template",
     "apply_template_variables"
   ]),
-  templatePath: z.string().optional(),
-  targetPath: z.string().optional(),
+  templatePath: z.string().optional()
+    .describe("【必須（operation が get_template / create_from_template / preview_template / validate_template / apply_template_variables のとき。list_templates のみ不要）】Path to the template file"),
+  targetPath: z.string().optional()
+    .describe("【必須（operation が create_from_template のとき）】Path where the new file should be created"),
   templateFolder: z.string().default("Templates"),
   variables: z.record(z.string()).optional(),
   autoGenerateVariables: z.boolean().default(true),

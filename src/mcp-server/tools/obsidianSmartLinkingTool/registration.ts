@@ -41,11 +41,11 @@ Uses content analysis, keyword matching, and semantic relationships to make inte
       },
       filePath: {
         type: "string",
-        description: "Path to the target note (required for note-specific operations)",
+        description: "【必須（operation が find_link_opportunities / suggest_backlinks / find_broken_links のとき。suggest_links_for_content / analyze_linkable_concepts / recommend_tags / get_link_suggestions では filePath か content のいずれかが必須）】Path to the target note",
       },
       content: {
         type: "string",
-        description: "Text content to analyze for link suggestions (alternative to filePath)",
+        description: "【必須（operation が suggest_links_for_content / analyze_linkable_concepts / recommend_tags / get_link_suggestions で filePath を渡さないとき）】Text content to analyze for link suggestions (alternative to filePath)",
       },
       maxSuggestions: {
         type: "number",

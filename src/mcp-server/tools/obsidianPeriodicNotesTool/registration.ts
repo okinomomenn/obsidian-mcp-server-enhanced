@@ -31,11 +31,11 @@ Perfect for daily journaling, weekly reviews, monthly planning, and temporal org
       period: {
         type: "string",
         enum: ["daily", "weekly", "monthly", "quarterly", "yearly"],
-        description: "Type of periodic note (required for most operations)",
+        description: "【必須（operation が get / create / append / update / exists のとき。list_periods のみ不要）】Type of periodic note",
       },
       content: {
         type: "string",
-        description: "Content to write or append (for create/update/append operations)",
+        description: "【必須（operation が update / append のとき）】Content to write or append (optional for create)",
       },
       date: {
         type: "string",

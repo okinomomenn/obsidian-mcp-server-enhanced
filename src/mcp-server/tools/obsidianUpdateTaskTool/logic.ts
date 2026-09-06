@@ -20,8 +20,10 @@ import * as chrono from "chrono-node";
 export const UpdateTaskInputSchema = z.object({
   // Task identification
   filePath: z.string(),
-  lineNumber: z.number().int().positive().optional(),
-  taskText: z.string().optional(), // For finding task by text match
+  lineNumber: z.number().int().positive().optional()
+    .describe("【必須（lineNumber か taskText のいずれか 1 つ。operation を問わず常に必要）】1-based line number of the task to update."),
+  taskText: z.string().optional() // For finding task by text match
+    .describe("【必須（lineNumber か taskText のいずれか 1 つ。operation を問わず常に必要）】Text of the task to locate (see exactMatch)."),
   
   // Update operations
   operation: z.enum([
@@ -41,7 +43,8 @@ export const UpdateTaskInputSchema = z.object({
   ]),
   
   // Operation parameters
-  newStatus: z.enum(["incomplete", "completed", "in-progress", "cancelled", "deferred", "scheduled"]).optional(),
+  newStatus: z.enum(["incomplete", "completed", "in-progress", "cancelled", "deferred", "scheduled"]).optional()
+    .describe("【必須（operation が set-status のとき）】Status to set on the task."),
   newText: z.string().optional(),
   priority: z.enum(["highest", "high", "medium", "low", "lowest"]).optional(),
   dueDate: z.string().optional(),
