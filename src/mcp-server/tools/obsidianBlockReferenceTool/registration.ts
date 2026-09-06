@@ -35,7 +35,7 @@ Supports both heading navigation (## Heading Name) and block reference operation
       },
       heading: {
         type: "string",
-        description: "Heading name to target (for heading-based operations)",
+        description: "【必須（operation が insert_under_heading / get_heading_content / append_to_heading / prepend_to_heading のとき）】Heading name to target",
       },
       headingLevel: {
         type: "number",
@@ -45,11 +45,11 @@ Supports both heading navigation (## Heading Name) and block reference operation
       },
       content: {
         type: "string",
-        description: "Content to insert, append, or prepend",
+        description: "【必須（operation が insert_under_heading / append_to_heading / prepend_to_heading / create_block_reference のとき）】Content to insert, append, or prepend",
       },
       blockId: {
         type: "string",
-        description: "Block ID for block reference operations (without ^)",
+        description: "【必須（operation が get_block_content / create_block_reference のとき）】Block ID for block reference operations (without ^)",
       },
       position: {
         type: "string",

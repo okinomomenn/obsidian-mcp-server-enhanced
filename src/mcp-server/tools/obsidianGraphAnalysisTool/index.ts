@@ -24,8 +24,10 @@ const GraphAnalysisArgsSchema = z.object({
     "analyze_tag_relationships",
     "get_vault_stats"
   ]),
-  filePath: z.string().optional(),
-  targetNote: z.string().optional(),
+  filePath: z.string().optional()
+    .describe("【必須（operation が get_note_links / get_backlinks / trace_connection_path のとき）】Path to the target note"),
+  targetNote: z.string().optional()
+    .describe("【必須（operation が trace_connection_path のとき）】Target note path for path tracing operations"),
   minConnections: z.number().min(1).default(5),
   includeTagLinks: z.boolean().default(true),
   includeFolderStructure: z.boolean().default(false),

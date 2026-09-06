@@ -39,7 +39,7 @@ const ManageFrontmatterInputSchemaBase = z.object({
     .any()
     .optional()
     .describe(
-      "The value to assign when using the 'set' operation. Can be a string, number, boolean, array, or a JSON object.",
+      "【必須（operation が set のとき）】The value to assign when using the 'set' operation. Can be a string, number, boolean, array, or a JSON object.",
     ),
 });
 

@@ -40,11 +40,11 @@ Supports both simple text replacement and advanced templating with variables.`,
       },
       templatePath: {
         type: "string",
-        description: "Path to the template file (required for template-specific operations)",
+        description: "【必須（operation が get_template / create_from_template / preview_template / validate_template / apply_template_variables のとき。list_templates のみ不要）】Path to the template file",
       },
       targetPath: {
         type: "string",
-        description: "Path where the new file should be created (for create_from_template)",
+        description: "【必須（operation が create_from_template のとき）】Path where the new file should be created",
       },
       templateFolder: {
         type: "string",

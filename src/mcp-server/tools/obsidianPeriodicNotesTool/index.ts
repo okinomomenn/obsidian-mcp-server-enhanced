@@ -16,8 +16,10 @@ import { executePeriodicNotesOperation, PeriodicNotesOperation } from "./logic.j
  */
 const PeriodicNotesArgsSchema = z.object({
   operation: z.enum(["get", "create", "append", "update", "list_periods", "exists"]),
-  period: z.enum(["daily", "weekly", "monthly", "quarterly", "yearly"]).optional(),
-  content: z.string().optional(),
+  period: z.enum(["daily", "weekly", "monthly", "quarterly", "yearly"]).optional()
+    .describe("【必須（operation が get / create / append / update / exists のとき。list_periods のみ不要）】Type of periodic note"),
+  content: z.string().optional()
+    .describe("【必須（operation が update / append のとき）】Content to write or append (optional for create)"),
   date: z.string().optional(),
   format: z.enum(["markdown", "json"]).default("markdown"),
   template: z.string().optional(),

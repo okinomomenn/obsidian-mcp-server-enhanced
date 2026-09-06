@@ -20,7 +20,7 @@ export const TasksQueryBuilderInputSchema = z.object({
   vault: z.string().optional(),
   
   // Core query building options
-  query: z.string().optional().describe("Raw Tasks plugin query syntax"),
+  query: z.string().optional().describe("【必須（query / filters / groupBy / sortBy をすべて省略した呼び出しはクエリを生成できず失敗する）】Raw Tasks plugin query syntax"),
   
   // Alternative: structured query building
   filters: z.object({
@@ -35,7 +35,7 @@ export const TasksQueryBuilderInputSchema = z.object({
     done: z.string().optional().describe("Done date filter"),
     recurrence: z.boolean().optional().describe("Show only recurring tasks"),
     hasDescription: z.boolean().optional().describe("Tasks with descriptions"),
-  }).optional(),
+  }).optional().describe("【必須（query / filters / groupBy / sortBy をすべて省略した呼び出しはクエリを生成できず失敗する）】Structured filters used to build the query when no raw query is given."),
   
   // Grouping and sorting
   groupBy: z.array(z.enum([

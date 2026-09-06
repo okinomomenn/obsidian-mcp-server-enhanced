@@ -58,7 +58,7 @@ const BaseObsidianSearchReplaceInputSchema = z.object({
     .string()
     .optional()
     .describe(
-      "Required if targetType is 'filePath' (vault-relative path) or 'periodicNote' (period string: 'daily', etc.). Tries case-insensitive fallback for filePath.",
+      "【必須（targetType が filePath / periodicNote のとき）】Required if targetType is 'filePath' (vault-relative path) or 'periodicNote' (period string: 'daily', etc.). Tries case-insensitive fallback for filePath.",
     ),
   /** An array of one or more search/replace operations to perform sequentially on the note content. */
   replacements: z

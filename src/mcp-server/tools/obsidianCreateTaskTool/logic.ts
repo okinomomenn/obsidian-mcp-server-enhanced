@@ -21,9 +21,12 @@ export const CreateTaskInputSchema = z.object({
   text: z.string().min(1, "Task text cannot be empty"),
   
   // Target location
-  filePath: z.string().optional(),
-  useActiveFile: z.boolean().default(false),
-  usePeriodicNote: z.enum(["daily", "weekly", "monthly"]).optional(),
+  filePath: z.string().optional()
+    .describe("【必須（filePath / useActiveFile=true / usePeriodicNote のいずれか 1 つ）】Vault-relative path of the file to create the task in."),
+  useActiveFile: z.boolean().default(false)
+    .describe("【必須（filePath / useActiveFile=true / usePeriodicNote のいずれか 1 つ）】Create the task in the currently active file."),
+  usePeriodicNote: z.enum(["daily", "weekly", "monthly"]).optional()
+    .describe("【必須（filePath / useActiveFile=true / usePeriodicNote のいずれか 1 つ）】Create the task in the current daily / weekly / monthly note."),
   section: z.string().optional(), // Heading to place task under
   
   // Task metadata
