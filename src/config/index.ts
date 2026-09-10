@@ -127,6 +127,19 @@ const EnvSchema = z.object({
   MCP_OAUTH_DB_PATH: z
     .string()
     .default(path.join(projectRoot, "data", "oauth.db")),
+  /**
+   * Comma-separated token `client_id` values whose tool access is confined by
+   * `src/mcp-server/oauth/clientPolicy.ts`: read vault-wide, write only under
+   * MCP_RESTRICTED_WRITE_ROOT, never delete.
+   *
+   * Empty (the default) disables the gate entirely, so an unset deployment
+   * behaves exactly as it did before the feature existed — which is also the
+   * rollback: clear this line, restart, done. Client ids are configuration,
+   * not code: they change when a connector re-registers.
+   */
+  MCP_RESTRICTED_CLIENT_IDS: z.string().default(""),
+  /** Vault-relative directory the restricted clients may write into. */
+  MCP_RESTRICTED_WRITE_ROOT: z.string().default("_inbox/astra"),
   // --- MCP Authentication (for multi-vault support) ---
   MCP_AUTH_KEY: z.string().min(1, "MCP_AUTH_KEY cannot be empty").optional(),
   // --- Multi-vault configuration ---
@@ -330,6 +343,11 @@ export const config = {
   mcpOauthCodeTtlSec: env.MCP_OAUTH_CODE_TTL_SEC,
   mcpOauthAutoApprove: env.MCP_OAUTH_AUTO_APPROVE,
   mcpOauthDbPath: env.MCP_OAUTH_DB_PATH,
+  // --- Per-client tool policy (see mcp-server/oauth/clientPolicy.ts) ---
+  mcpRestrictedClientIds: env.MCP_RESTRICTED_CLIENT_IDS.split(",")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0),
+  mcpRestrictedWriteRoot: env.MCP_RESTRICTED_WRITE_ROOT,
   // --- MCP Authentication ---
   mcpAuthKey: mcpAuthKey!,
   // --- Vault Configuration ---
