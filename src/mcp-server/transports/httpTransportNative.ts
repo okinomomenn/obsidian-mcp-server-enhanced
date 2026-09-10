@@ -21,12 +21,27 @@ import {
 import { VaultManager } from "../../services/vaultManager/index.js";
 import { handleChatGptLayerRequest } from "../../chatgpt/layer.js";
 import { verifyBearer } from "../oauth/bearer.js";
+import { decide, type ClientPolicy } from "../oauth/clientPolicy.js";
 import { buildOAuthDepsFromConfig, routeOAuth, type OAuthRouterDeps } from "../oauth/router.js";
 import { startTokenStoreGc } from "../oauth/tokenStore.js";
+import type { AccessTokenClaims } from "../oauth/types.js";
 
 const HTTP_PORT = config.mcpHttpPort;
 const HTTP_HOST = config.mcpHttpHost;
 const MCP_ENDPOINT_PATH = "/mcp";
+
+/**
+ * Per-client tool authorization, read once at module load.
+ *
+ * `enabled: false` means the gate never fires; see
+ * `mcp-server/oauth/clientPolicy.ts` for why the decision has to happen here
+ * rather than in the tool registry, and why the list is an allow list.
+ */
+const CLIENT_POLICY: ClientPolicy = {
+  enabled: config.mcpClientPolicyEnabled,
+  unrestrictedClientIds: config.mcpUnrestrictedClientIds,
+  writeRoot: config.mcpRestrictedWriteRoot,
+};
 
 /**
  * Stores active `StreamableHTTPServerTransport` instances, keyed by session ID.
@@ -468,14 +483,17 @@ export async function startHttpTransport(
       }
 
       // Authentication: OAuth Bearer (mode=oauth) or legacy ?api_key= (mode=legacy)
+      // Kept in scope: the tool-policy gate below needs the client identity,
+      // and this is the only point where it has been verified.
+      let tokenClaims: AccessTokenClaims | null = null;
       if (oauthDeps) {
-        const claims = await verifyBearer(req, res, {
+        tokenClaims = await verifyBearer(req, res, {
           jwtSecret: oauthDeps.jwtSecret,
           issuerUrl: oauthDeps.issuerUrl,
           audience: `${oauthDeps.issuerUrl}${MCP_ENDPOINT_PATH}`,
           resourceMetadataUrl: `${oauthDeps.issuerUrl}/.well-known/oauth-protected-resource`,
         });
-        if (!claims) return; // verifyBearer already wrote the 401 response
+        if (!tokenClaims) return; // verifyBearer already wrote the 401 response
       } else if (!validateApiKey(req, url)) {
         logger.warning(`Authentication failed for request: ${req.method} ${req.url}`, {
           ...requestContext,
@@ -518,6 +536,10 @@ export async function startHttpTransport(
         // can tell whether a client-side request id (x-request-id or similar)
         // ever reaches us. Names only — values are never read or logged, which
         // keeps Authorization and any session token out of the log entirely.
+        //
+        // Runs BEFORE the policy gate below: a refused call is still a call
+        // that arrived, and latching only on permitted calls would lose the
+        // diagnostic whenever the first tools/call happens to be refused.
         if (!headerNamesLogged && respRec.rpcMethod === "tools/call") {
           headerNamesLogged = true;
           logger.info(`Incoming header names on first tools/call`, {
@@ -525,6 +547,43 @@ export async function startHttpTransport(
             operation: "IncomingHeaderNames",
             headerNames: Object.keys(req.headers).sort(),
           });
+        }
+
+        // Per-client tool authorization. In stateless mode one McpServer
+        // instance serves every client, so the call has to be judged here —
+        // before it reaches the shared tool registry.
+        if (respRec.rpcMethod === "tools/call" && CLIENT_POLICY.enabled) {
+          const verdict = decide({
+            policy: CLIENT_POLICY,
+            clientId: tokenClaims?.client_id,
+            tool: respRec.tool ?? "",
+            targetPath: respRec.targetIdentifier,
+          });
+          if (!verdict.allowed) {
+            logger.warning(`Tool call refused by client policy`, {
+              ...requestContext,
+              operation: "ToolPolicyDenied",
+              clientId: tokenClaims?.client_id,
+              tool: respRec.tool,
+              targetIdentifier: respRec.targetIdentifier,
+              reason: verdict.reason,
+            });
+            // A tool-level error, not a transport error: the refusal has to
+            // reach the model as readable text so it can correct itself. A
+            // JSON-RPC error would be swallowed by some clients.
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(
+              JSON.stringify({
+                jsonrpc: "2.0",
+                id: body?.id ?? null,
+                result: {
+                  content: [{ type: "text", text: verdict.reason }],
+                  isError: true,
+                },
+              }),
+            );
+            return;
+          }
         }
 
         // Log POST body for debugging (without sensitive data)

@@ -127,6 +127,31 @@ const EnvSchema = z.object({
   MCP_OAUTH_DB_PATH: z
     .string()
     .default(path.join(projectRoot, "data", "oauth.db")),
+  /**
+   * Master switch for the per-client tool policy
+   * (`src/mcp-server/oauth/clientPolicy.ts`). Off by default, and off is also
+   * the rollback: clear this line, restart, done.
+   *
+   * Separate from the list below because that list is an ALLOW list — enabling
+   * with an empty list would restrict every client, so enabling and listing
+   * must be two deliberate acts.
+   */
+  MCP_CLIENT_POLICY_ENABLED: z
+    .string()
+    .transform((val) => val.toLowerCase() === "true")
+    .default("false"),
+  /**
+   * Comma-separated token `client_id` values that keep vault-wide access. Every
+   * other client — including one never seen before — is confined to
+   * MCP_RESTRICTED_WRITE_ROOT for writes and refused deletion outright.
+   *
+   * An entry ending in `*` matches by prefix, which is how a CIMD client stays
+   * covered across re-registration: its client_id is a URL under a stable
+   * origin, while DCR ids are freshly minted UUIDs.
+   */
+  MCP_UNRESTRICTED_CLIENT_IDS: z.string().default(""),
+  /** Vault-relative directory the restricted clients may write into. */
+  MCP_RESTRICTED_WRITE_ROOT: z.string().default("_inbox/astra"),
   // --- MCP Authentication (for multi-vault support) ---
   MCP_AUTH_KEY: z.string().min(1, "MCP_AUTH_KEY cannot be empty").optional(),
   // --- Multi-vault configuration ---
@@ -330,6 +355,12 @@ export const config = {
   mcpOauthCodeTtlSec: env.MCP_OAUTH_CODE_TTL_SEC,
   mcpOauthAutoApprove: env.MCP_OAUTH_AUTO_APPROVE,
   mcpOauthDbPath: env.MCP_OAUTH_DB_PATH,
+  // --- Per-client tool policy (see mcp-server/oauth/clientPolicy.ts) ---
+  mcpClientPolicyEnabled: env.MCP_CLIENT_POLICY_ENABLED,
+  mcpUnrestrictedClientIds: env.MCP_UNRESTRICTED_CLIENT_IDS.split(",")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0),
+  mcpRestrictedWriteRoot: env.MCP_RESTRICTED_WRITE_ROOT,
   // --- MCP Authentication ---
   mcpAuthKey: mcpAuthKey!,
   // --- Vault Configuration ---
