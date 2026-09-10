@@ -33,12 +33,13 @@ const MCP_ENDPOINT_PATH = "/mcp";
 /**
  * Per-client tool authorization, read once at module load.
  *
- * An empty `restrictedClientIds` means the gate never fires; see
+ * `enabled: false` means the gate never fires; see
  * `mcp-server/oauth/clientPolicy.ts` for why the decision has to happen here
- * rather than in the tool registry.
+ * rather than in the tool registry, and why the list is an allow list.
  */
 const CLIENT_POLICY: ClientPolicy = {
-  restrictedClientIds: config.mcpRestrictedClientIds,
+  enabled: config.mcpClientPolicyEnabled,
+  unrestrictedClientIds: config.mcpUnrestrictedClientIds,
   writeRoot: config.mcpRestrictedWriteRoot,
 };
 
@@ -525,10 +526,7 @@ export async function startHttpTransport(
         // Per-client tool authorization. In stateless mode one McpServer
         // instance serves every client, so the call has to be judged here —
         // before it reaches the shared tool registry.
-        if (
-          respRec.rpcMethod === "tools/call" &&
-          CLIENT_POLICY.restrictedClientIds.length > 0
-        ) {
+        if (respRec.rpcMethod === "tools/call" && CLIENT_POLICY.enabled) {
           const verdict = decide({
             policy: CLIENT_POLICY,
             clientId: tokenClaims?.client_id,

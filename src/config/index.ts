@@ -128,16 +128,28 @@ const EnvSchema = z.object({
     .string()
     .default(path.join(projectRoot, "data", "oauth.db")),
   /**
-   * Comma-separated token `client_id` values whose tool access is confined by
-   * `src/mcp-server/oauth/clientPolicy.ts`: read vault-wide, write only under
-   * MCP_RESTRICTED_WRITE_ROOT, never delete.
+   * Master switch for the per-client tool policy
+   * (`src/mcp-server/oauth/clientPolicy.ts`). Off by default, and off is also
+   * the rollback: clear this line, restart, done.
    *
-   * Empty (the default) disables the gate entirely, so an unset deployment
-   * behaves exactly as it did before the feature existed — which is also the
-   * rollback: clear this line, restart, done. Client ids are configuration,
-   * not code: they change when a connector re-registers.
+   * Separate from the list below because that list is an ALLOW list — enabling
+   * with an empty list would restrict every client, so enabling and listing
+   * must be two deliberate acts.
    */
-  MCP_RESTRICTED_CLIENT_IDS: z.string().default(""),
+  MCP_CLIENT_POLICY_ENABLED: z
+    .string()
+    .transform((val) => val.toLowerCase() === "true")
+    .default("false"),
+  /**
+   * Comma-separated token `client_id` values that keep vault-wide access. Every
+   * other client — including one never seen before — is confined to
+   * MCP_RESTRICTED_WRITE_ROOT for writes and refused deletion outright.
+   *
+   * An entry ending in `*` matches by prefix, which is how a CIMD client stays
+   * covered across re-registration: its client_id is a URL under a stable
+   * origin, while DCR ids are freshly minted UUIDs.
+   */
+  MCP_UNRESTRICTED_CLIENT_IDS: z.string().default(""),
   /** Vault-relative directory the restricted clients may write into. */
   MCP_RESTRICTED_WRITE_ROOT: z.string().default("_inbox/astra"),
   // --- MCP Authentication (for multi-vault support) ---
@@ -344,7 +356,8 @@ export const config = {
   mcpOauthAutoApprove: env.MCP_OAUTH_AUTO_APPROVE,
   mcpOauthDbPath: env.MCP_OAUTH_DB_PATH,
   // --- Per-client tool policy (see mcp-server/oauth/clientPolicy.ts) ---
-  mcpRestrictedClientIds: env.MCP_RESTRICTED_CLIENT_IDS.split(",")
+  mcpClientPolicyEnabled: env.MCP_CLIENT_POLICY_ENABLED,
+  mcpUnrestrictedClientIds: env.MCP_UNRESTRICTED_CLIENT_IDS.split(",")
     .map((s) => s.trim())
     .filter((s) => s.length > 0),
   mcpRestrictedWriteRoot: env.MCP_RESTRICTED_WRITE_ROOT,

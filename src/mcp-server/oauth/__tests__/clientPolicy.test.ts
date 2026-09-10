@@ -30,6 +30,7 @@ import {
   classifyTool,
   decide,
   isInsideWriteRoot,
+  isUnrestricted,
   normalizeVaultPath,
   type ClientPolicy,
   type ToolClass,
@@ -38,9 +39,12 @@ import {
 const ASTRA = "f8f2a3fa-9bde-4cb6-afc9-a66412a43789";
 const CLAUDE = "https://claude.ai/oauth/mcp-oauth-client-metadata";
 const OPENWEBUI = "53281724-cd37-408d-a3e0-71f071077d7b";
+/** What a re-registration mints: an id nobody has configured. */
+const NEWCOMER = "00000000-1111-2222-3333-444444444444";
 
 const POLICY: ClientPolicy = {
-  restrictedClientIds: [ASTRA],
+  enabled: true,
+  unrestrictedClientIds: ["https://claude.ai/*", OPENWEBUI],
   writeRoot: "_inbox/astra",
 };
 
@@ -129,11 +133,10 @@ describe("clientPolicy — the authorization matrix", () => {
   }
 });
 
-describe("clientPolicy — unrestricted clients are untouched", () => {
+describe("clientPolicy — listed clients keep full access", () => {
   for (const [label, id] of [
-    ["Claude (CIMD)", CLAUDE],
-    ["Open WebUI", OPENWEBUI],
-    ["no client_id", undefined],
+    ["Claude (CIMD, matched by prefix)", CLAUDE],
+    ["Open WebUI (exact id)", OPENWEBUI],
   ] as const) {
     it(`${label}: every tool allowed everywhere, delete included`, () => {
       for (const tool of Object.keys(TOOL_CLASS)) {
@@ -145,10 +148,67 @@ describe("clientPolicy — unrestricted clients are untouched", () => {
     });
   }
 
-  it("an empty restricted list disables the gate entirely", () => {
-    const off: ClientPolicy = { restrictedClientIds: [], writeRoot: "_inbox/astra" };
-    const d = decide({ policy: off, clientId: ASTRA, tool: "obsidian_delete_file", targetPath: OUTSIDE });
+  it("a Claude id under the same origin but a different path still matches", () => {
+    const d = decide({
+      policy: POLICY,
+      clientId: "https://claude.ai/oauth/some-future-metadata-document",
+      tool: "obsidian_delete_file",
+      targetPath: OUTSIDE,
+    });
     assert.equal(d.allowed, true);
+  });
+
+  it("prefix matching does not leak to a lookalike origin", () => {
+    assert.equal(isUnrestricted("https://claude.ai.evil.test/x", ["https://claude.ai/*"]), false);
+    assert.equal(isUnrestricted("https://claude.ai/anything", ["https://claude.ai/*"]), true);
+    assert.equal(isUnrestricted(OPENWEBUI, [OPENWEBUI]), true);
+    assert.equal(isUnrestricted(OPENWEBUI + "x", [OPENWEBUI]), false);
+  });
+});
+
+describe("clientPolicy — the gate fails closed on an unknown client", () => {
+  it("a newly minted client_id is restricted, not waved through", () => {
+    const w = decide({ policy: POLICY, clientId: NEWCOMER, tool: "obsidian_update_file", targetPath: OUTSIDE });
+    assert.equal(w.allowed, false, "unknown client must not get vault-wide write");
+    const d = decide({ policy: POLICY, clientId: NEWCOMER, tool: "obsidian_delete_file", targetPath: INSIDE });
+    assert.equal(d.allowed, false, "unknown client must not get delete");
+    const r = decide({ policy: POLICY, clientId: NEWCOMER, tool: "obsidian_read_file", targetPath: OUTSIDE });
+    assert.equal(r.allowed, true, "reading stays vault-wide even for an unknown client");
+  });
+
+  it("this is the re-registration case: Astra comes back with a new id and stays confined", () => {
+    // The whole point of the allow-list polarity. Under the old deny-list
+    // shape this call was allowed, because the configured id matched nobody.
+    const d = decide({ policy: POLICY, clientId: NEWCOMER, tool: "obsidian_update_file", targetPath: "CLAUDE.md" });
+    assert.equal(d.allowed, false);
+  });
+
+  it("a missing client_id is treated as unknown, not as trusted", () => {
+    const d = decide({ policy: POLICY, clientId: undefined, tool: "obsidian_update_file", targetPath: OUTSIDE });
+    assert.equal(d.allowed, false);
+  });
+
+  it("enabled with an empty allow list restricts everyone, including Claude", () => {
+    // Documented hazard, which is why `enabled` is a separate switch: turning
+    // the gate on without populating the list must not be a silent surprise.
+    const bare: ClientPolicy = { enabled: true, unrestrictedClientIds: [], writeRoot: "_inbox/astra" };
+    const d = decide({ policy: bare, clientId: CLAUDE, tool: "obsidian_update_file", targetPath: OUTSIDE });
+    assert.equal(d.allowed, false);
+  });
+});
+
+describe("clientPolicy — the master switch is the rollback", () => {
+  const off: ClientPolicy = { enabled: false, unrestrictedClientIds: [], writeRoot: "_inbox/astra" };
+
+  it("disabled allows every client, every tool, every path", () => {
+    for (const id of [ASTRA, CLAUDE, OPENWEBUI, NEWCOMER, undefined]) {
+      for (const tool of Object.keys(TOOL_CLASS)) {
+        for (const target of [INSIDE, OUTSIDE, null]) {
+          const d = decide({ policy: off, clientId: id, tool, targetPath: target });
+          assert.equal(d.allowed, true, `${id} / ${tool} / ${target}`);
+        }
+      }
+    }
   });
 });
 

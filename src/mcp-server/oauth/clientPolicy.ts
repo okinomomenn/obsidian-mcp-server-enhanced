@@ -18,12 +18,19 @@
  * never silently widen a restricted client's reach. `classifyTool` is exported
  * so a test can assert the table covers the live registry exactly.
  *
- * SCOPE OF THE RESTRICTION
+ * SCOPE OF THE RESTRICTION — AN ALLOW LIST, NOT A DENY LIST
  *
- * Only clients listed in `restrictedClientIds` are affected. Everyone else —
- * Claude (a CIMD client whose client_id is a URL), Open WebUI, and any future
- * client — takes the `allow` path on the first branch and behaves exactly as
- * before this module existed.
+ * Clients named in `unrestrictedClientIds` keep full access; everyone else is
+ * restricted, including a client_id nobody has seen before. The reverse shape
+ * was tried first and fails open exactly when it matters: a connector
+ * re-registers, DCR mints a new client_id, the configured id matches nobody,
+ * and the gate quietly stops applying. Reversed, that same event lands the
+ * newcomer in the restricted class.
+ *
+ * The cost is the mirror hazard — if a trusted client's id changes it loses
+ * vault-wide access until the list is updated. That failure is loud (a refusal
+ * with a reason) rather than silent, and `enabled: false` restores the old
+ * behaviour without touching code.
  */
 
 /** What a tool does to the vault. Drives the decision in `decide`. */
@@ -70,10 +77,45 @@ export function classifyTool(tool: string): ToolClass {
 }
 
 export interface ClientPolicy {
-  /** Token `client_id` values this policy applies to. Everyone else is unrestricted. */
-  restrictedClientIds: readonly string[];
+  /**
+   * Master switch. `false` short-circuits every decision to allow, which is
+   * both the default and the rollback: clear the env line, restart, done.
+   *
+   * It exists because the list below is an ALLOW list, so an empty list plus
+   * an enabled gate would restrict everyone. Enabling and listing have to be
+   * two separate acts.
+   */
+  enabled: boolean;
+  /**
+   * Clients that keep full vault-wide access. Everyone else — including a
+   * client_id nobody has seen before — gets the restricted treatment.
+   *
+   * DELIBERATELY AN ALLOW LIST. The first version keyed on the restricted ids
+   * instead, which failed open in the one situation most likely to arise: a
+   * connector re-registers (after a key rotation, say), DCR mints a fresh
+   * client_id, the configured id now matches nobody, and the gate silently
+   * stops applying. Reversed, that same event lands the newcomer in the
+   * restricted class, which is loud and safe.
+   *
+   * An entry ending in `*` matches by prefix. That is what keeps a CIMD client
+   * covered: its client_id is a URL under a stable origin, while DCR ids are
+   * volatile UUIDs.
+   */
+  unrestrictedClientIds: readonly string[];
   /** Vault-relative directory the restricted clients may write into, e.g. `_inbox/astra`. */
   writeRoot: string;
+}
+
+/** Exact match, or prefix match for an entry written with a trailing `*`. */
+export function isUnrestricted(clientId: string, patterns: readonly string[]): boolean {
+  for (const p of patterns) {
+    if (p.endsWith("*")) {
+      if (clientId.startsWith(p.slice(0, -1))) return true;
+    } else if (clientId === p) {
+      return true;
+    }
+  }
+  return false;
 }
 
 export type PolicyDecision =
@@ -133,12 +175,16 @@ export function decide(input: {
 }): PolicyDecision {
   const { policy, clientId, tool, targetPath } = input;
 
-  // 1. Unrestricted clients (Claude, Open WebUI, …) are untouched.
-  if (!clientId || !policy.restrictedClientIds.includes(clientId)) return ALLOW;
+  // 1. Gate off: behave exactly as if this module did not exist.
+  if (!policy.enabled) return ALLOW;
+
+  // 2. Listed clients keep full access. An absent client_id is NOT one of them:
+  //    no identity means the caller cannot be vouched for, so it is restricted.
+  if (clientId && isUnrestricted(clientId, policy.unrestrictedClientIds)) return ALLOW;
 
   const cls = classifyTool(tool);
 
-  // 2. Deletion is refused everywhere, including inside the client's own 区画:
+  // 3. Deletion is refused everywhere, including inside the client's own 区画:
   //    removing notes is the cleanup lane's job, never an agent's.
   if (cls === "delete") {
     return {
@@ -149,10 +195,10 @@ export function decide(input: {
     };
   }
 
-  // 3. Reading is allowed vault-wide.
+  // 4. Reading is allowed vault-wide.
   if (cls === "read") return ALLOW;
 
-  // 4. Writing (and anything unclassified) is confined to the write root.
+  // 5. Writing (and anything unclassified) is confined to the write root.
   if (targetPath === null) {
     return {
       allowed: false,
