@@ -383,76 +383,39 @@ export const processObsidianUpdateFile = async (
       checkContext,
     );
 
+    // A 404 here is not a failure: it is the expected answer when the target
+    // does not exist yet. Asking again cannot change it, so this check is a
+    // single attempt — retrying only added a fixed delay and emitted an ERROR
+    // line ("failed definitively") for what is a normal create.
     try {
-      await retryWithDelay(
-        async () => {
-          if (params.targetType === "filePath" && targetId) {
-            await obsidianService.getFileContent(
-              targetId,
-              "json",
-              checkContext,
-            );
-          } else if (params.targetType === "activeFile") {
-            await obsidianService.getActiveFile("json", checkContext);
-          } else if (params.targetType === "periodicNote" && targetPeriod) {
-            await obsidianService.getPeriodicNote(
-              targetPeriod,
-              "json",
-              checkContext,
-            );
-          }
-          // If any of the above succeed without throwing, the target exists.
-          existsBefore = true;
-          logger.debug(`Target exists before operation.`, checkContext);
-        },
-        {
-          operationName: "existenceCheckObsidianUpdateFile",
-          context: checkContext,
-          maxRetries: 3, // Total attempts: 1 initial + 2 retries
-          delayMs: 250,
-          shouldRetry: (error: unknown) => {
-            // Only retry if it's a NOT_FOUND error AND createIfNeeded is true.
-            // If createIfNeeded is false, a NOT_FOUND error means we shouldn't proceed, so don't retry.
-            const should =
-              error instanceof McpError &&
-              error.code === BaseErrorCode.NOT_FOUND &&
-              params.createIfNeeded;
-            if (
-              error instanceof McpError &&
-              error.code === BaseErrorCode.NOT_FOUND
-            ) {
-              logger.debug(
-                `existenceCheckObsidianUpdateFile: shouldRetry=${should} for NOT_FOUND (createIfNeeded: ${params.createIfNeeded})`,
-                checkContext,
-              );
-            }
-            return should;
-          },
-          onRetry: (attempt, error) => {
-            const errorMsg =
-              error instanceof Error ? error.message : String(error);
-            logger.warning(
-              `Existence check (attempt ${attempt}) failed for target '${params.targetType} ${targetId ?? ""}'. Error: ${errorMsg}. Retrying as createIfNeeded is true...`,
-              checkContext,
-            );
-          },
-        },
-      );
+      if (params.targetType === "filePath" && targetId) {
+        await obsidianService.getFileContent(targetId, "json", checkContext);
+      } else if (params.targetType === "activeFile") {
+        await obsidianService.getActiveFile("json", checkContext);
+      } else if (params.targetType === "periodicNote" && targetPeriod) {
+        await obsidianService.getPeriodicNote(
+          targetPeriod,
+          "json",
+          checkContext,
+        );
+      }
+      // If any of the above succeed without throwing, the target exists.
+      existsBefore = true;
+      logger.debug(`Target exists before operation.`, checkContext);
     } catch (error) {
-      // This catch block is primarily for the case where retryWithDelay itself throws
-      // (e.g., all retries exhausted for NOT_FOUND with createIfNeeded=true, or an unretryable error occurred).
       if (error instanceof McpError && error.code === BaseErrorCode.NOT_FOUND) {
-        // If it's still NOT_FOUND after retries (or if createIfNeeded was false and it failed the first time),
-        // then existsBefore should definitely be false.
+        // Expected for a new file. Creation is gated by createIfNeeded in Step 2.
         existsBefore = false;
         logger.debug(
-          `Target confirmed not to exist after existence check attempts (createIfNeeded: ${params.createIfNeeded}).`,
+          `Target confirmed not to exist (createIfNeeded: ${params.createIfNeeded}).`,
           checkContext,
         );
       } else {
-        // For any other error type, re-throw it as it's unexpected here.
+        // Anything else — notably SERVICE_UNAVAILABLE when Obsidian is
+        // unreachable — is a real failure. Re-throw so that we never treat an
+        // unreachable vault as "file absent" and create or overwrite blindly.
         logger.error(
-          `Unexpected error after existence check retries`,
+          `Existence check failed with a non-NOT_FOUND error; aborting update.`,
           error instanceof Error ? error : undefined,
           checkContext,
         );
