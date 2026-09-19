@@ -155,6 +155,9 @@ export async function handleAuthorize(
     resource: params.resource,
     scope: grantedScopes.join(" "),
     ttlSec: deps.codeTtlSec,
+    // Bound here, enforced at /token. For every DCR client and every CIMD public
+    // client this is "none", i.e. the behaviour that existed before the column.
+    clientAuthMethod: client.tokenEndpointAuthMethod,
   });
   redirectWithCode(res, params.redirect_uri, code.code, params.state, deps.issuerUrl);
 }

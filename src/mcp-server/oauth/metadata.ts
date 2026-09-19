@@ -35,7 +35,20 @@ export function authorizationServerMetadata(issuerUrl: string) {
     response_types_supported: ["code"],
     grant_types_supported: ["authorization_code", "refresh_token"],
     code_challenge_methods_supported: ["S256"],
-    token_endpoint_auth_methods_supported: ["none"],
+    /**
+     * "none" is the path every current connector uses. "private_key_jwt" was added
+     * 2026-09-18 for CIMD clients that refuse to act as public clients (ChatGPT).
+     * DCR registrations cannot select it — register.ts accepts only "none" — so
+     * advertising it cannot change how an existing DCR client authenticates.
+     * Rollback for the private_key_jwt feature starts by trimming this array.
+     */
+    token_endpoint_auth_methods_supported: ["none", "private_key_jwt"],
+    token_endpoint_auth_signing_alg_values_supported: [
+      "RS256", "RS384", "RS512",
+      "PS256", "PS384", "PS512",
+      "ES256", "ES384", "ES512",
+      "EdDSA",
+    ],
     scopes_supported: [...SCOPES],
     /** MCP 2025-11-25 §Discovery — advertise CIMD support for forward-compatibility. */
     client_id_metadata_document_supported: true,

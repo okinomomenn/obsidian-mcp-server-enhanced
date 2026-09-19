@@ -9,16 +9,40 @@ import { z } from "zod";
 export const SCOPES = ["mcp"] as const;
 export type Scope = (typeof SCOPES)[number];
 
+/**
+ * Token endpoint client authentication method.
+ *   - "none"             — public client (DCR, and CIMD v1). PKCE is the only proof.
+ *   - "private_key_jwt"  — CIMD only (2026-09-18). The client signs a JWT assertion
+ *                          with a key published in its own CIMD document.
+ * DCR registrations are always "none": register.ts accepts no other value.
+ */
+export type TokenEndpointAuthMethod = "none" | "private_key_jwt";
+
 /** A registered or fetched OAuth client. Unified view over DCR + CIMD. */
 export interface ClientRegistration {
   clientId: string;
   clientName: string;
   redirectUris: string[];
   createdAt: number;
-  /** Token endpoint auth method — always "none" in v1 (public clients only). */
-  tokenEndpointAuthMethod: "none";
+  /** Token endpoint auth method. "none" for every DCR client; CIMD may declare private_key_jwt. */
+  tokenEndpointAuthMethod: TokenEndpointAuthMethod;
   /** Where the registration came from. "dcr" = POST /register, "cimd" = fetched from URL client_id. */
   source: "dcr" | "cimd";
+  /**
+   * private_key_jwt key material, as declared by the CIMD document. Exactly one of
+   * these is set when tokenEndpointAuthMethod === "private_key_jwt"; both are
+   * absent otherwise. `jwks` is an inline JWK Set; `jwksUri` is an https URL that
+   * is fetched (fail-closed) at assertion-verification time.
+   */
+  jwks?: JsonWebKeySet;
+  jwksUri?: string;
+  /** RFC 7591 token_endpoint_auth_signing_alg, when the client pins one. */
+  tokenEndpointAuthSigningAlg?: string;
+}
+
+/** Minimal JWK Set shape — keys are handed to jose verbatim. */
+export interface JsonWebKeySet {
+  keys: Record<string, unknown>[];
 }
 
 /** A short-lived authorization code, single-use, PKCE-bound. */
@@ -34,6 +58,11 @@ export interface AuthorizationCode {
   expiresAt: number;
   /** Flipped to true on first /token exchange to prevent replay. */
   consumed: boolean;
+  /**
+   * Client authentication method bound at /authorize time. /token enforces this
+   * instead of re-resolving the client, so a CIMD exchange still costs no network.
+   */
+  clientAuthMethod: TokenEndpointAuthMethod;
 }
 
 /** An issued refresh token, rotated on every use (OAuth 2.1 requirement for public clients). */
@@ -43,6 +72,8 @@ export interface RefreshToken {
   resource: string;
   scope: string;
   expiresAt: number;
+  /** Carried forward across every rotation — see AuthorizationCode.clientAuthMethod. */
+  clientAuthMethod: TokenEndpointAuthMethod;
 }
 
 /** Decoded access token claims (HS256 JWT). */
@@ -94,6 +125,9 @@ export const TokenAuthCodeRequestSchema = z.object({
    * made /token fail closed with invalid_request and broke the connector.
    */
   resource: z.string().url().optional(),
+  /** RFC 7523 §2.2 client authentication — present only for private_key_jwt clients. */
+  client_assertion_type: z.string().optional(),
+  client_assertion: z.string().optional(),
 });
 export type TokenAuthCodeRequest = z.infer<typeof TokenAuthCodeRequestSchema>;
 
@@ -105,6 +139,9 @@ export const TokenRefreshRequestSchema = z.object({
   /** RFC 8707 §2.2 — OPTIONAL; falls back to the resource bound to the refresh token. */
   resource: z.string().url().optional(),
   scope: z.string().optional(),
+  /** RFC 7523 §2.2 client authentication — present only for private_key_jwt clients. */
+  client_assertion_type: z.string().optional(),
+  client_assertion: z.string().optional(),
 });
 export type TokenRefreshRequest = z.infer<typeof TokenRefreshRequestSchema>;
 

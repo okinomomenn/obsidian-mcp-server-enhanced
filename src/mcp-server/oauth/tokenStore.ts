@@ -14,7 +14,12 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { SignJWT, jwtVerify } from "jose";
 import { getDb } from "./db.js";
-import type { AccessTokenClaims, AuthorizationCode, RefreshToken } from "./types.js";
+import type {
+  AccessTokenClaims,
+  AuthorizationCode,
+  RefreshToken,
+  TokenEndpointAuthMethod,
+} from "./types.js";
 import { OAuthError } from "./types.js";
 
 interface CodeRow {
@@ -26,6 +31,7 @@ interface CodeRow {
   scope: string;
   expires_at: number;
   consumed: number;
+  client_auth_method: string;
 }
 
 interface RefreshRow {
@@ -34,6 +40,7 @@ interface RefreshRow {
   resource: string;
   scope: string;
   expires_at: number;
+  client_auth_method: string;
 }
 
 function toCode(row: CodeRow): AuthorizationCode {
@@ -47,6 +54,7 @@ function toCode(row: CodeRow): AuthorizationCode {
     expiresAt: row.expires_at,
     // SQLite has no boolean type; the column is INTEGER 0/1.
     consumed: row.consumed !== 0,
+    clientAuthMethod: toAuthMethod(row.client_auth_method),
   };
 }
 
@@ -57,7 +65,18 @@ function toRefresh(row: RefreshRow): RefreshToken {
     resource: row.resource,
     scope: row.scope,
     expiresAt: row.expires_at,
+    clientAuthMethod: toAuthMethod(row.client_auth_method),
   };
+}
+
+/**
+ * Narrow the stored string. Anything unrecognised — a row written by a newer build
+ * and read back by an older one — collapses to "private_key_jwt" rather than
+ * "none": an unreadable requirement must not silently become no requirement.
+ */
+function toAuthMethod(value: string | null | undefined): TokenEndpointAuthMethod {
+  if (value === "none" || value === undefined || value === null) return "none";
+  return "private_key_jwt";
 }
 
 function secretKey(secret: string): Uint8Array {
@@ -73,6 +92,8 @@ export function issueCode(input: {
   resource: string;
   scope: string;
   ttlSec: number;
+  /** How the client must authenticate at /token. Defaults to the public-client path. */
+  clientAuthMethod?: TokenEndpointAuthMethod;
 }): AuthorizationCode {
   const code: AuthorizationCode = {
     code: randomBytes(32).toString("base64url"),
@@ -83,12 +104,13 @@ export function issueCode(input: {
     scope: input.scope,
     expiresAt: Date.now() + input.ttlSec * 1000,
     consumed: false,
+    clientAuthMethod: input.clientAuthMethod ?? "none",
   };
   getDb()
     .prepare(
       `INSERT INTO codes
-         (code, client_id, redirect_uri, code_challenge, resource, scope, expires_at, consumed)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 0)`,
+         (code, client_id, redirect_uri, code_challenge, resource, scope, expires_at, consumed, client_auth_method)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)`,
     )
     .run(
       code.code,
@@ -98,8 +120,32 @@ export function issueCode(input: {
       code.resource,
       code.scope,
       code.expiresAt,
+      code.clientAuthMethod,
     );
   return code;
+}
+
+/**
+ * Non-destructive reads of the client authentication requirement bound to a grant.
+ *
+ * These exist so /token can verify a private_key_jwt assertion BEFORE consuming the
+ * code or rotating the refresh token. Verifying afterwards would mean a transient
+ * jwks_uri hiccup destroys the grant and logs the connector out permanently.
+ * `undefined` means "no such grant" — the caller then falls through to
+ * consumeCode / rotateRefreshToken, which raise the usual invalid_grant.
+ */
+export function peekCodeAuthMethod(value: string): TokenEndpointAuthMethod | undefined {
+  const row = getDb()
+    .prepare(`SELECT client_auth_method FROM codes WHERE code = ?`)
+    .get(value) as { client_auth_method: string } | undefined;
+  return row ? toAuthMethod(row.client_auth_method) : undefined;
+}
+
+export function peekRefreshAuthMethod(value: string): TokenEndpointAuthMethod | undefined {
+  const row = getDb()
+    .prepare(`SELECT client_auth_method FROM refresh_tokens WHERE token = ?`)
+    .get(value) as { client_auth_method: string } | undefined;
+  return row ? toAuthMethod(row.client_auth_method) : undefined;
 }
 
 /** Single-use: returns code only if unconsumed and unexpired, then marks consumed. */
@@ -177,6 +223,8 @@ export function issueRefreshToken(input: {
   resource: string;
   scope: string;
   ttlSec: number;
+  /** Carried forward on every rotation so the requirement survives restarts. */
+  clientAuthMethod?: TokenEndpointAuthMethod;
 }): RefreshToken {
   const rt: RefreshToken = {
     token: randomBytes(48).toString("base64url"),
@@ -184,13 +232,14 @@ export function issueRefreshToken(input: {
     resource: input.resource,
     scope: input.scope,
     expiresAt: Date.now() + input.ttlSec * 1000,
+    clientAuthMethod: input.clientAuthMethod ?? "none",
   };
   getDb()
     .prepare(
-      `INSERT INTO refresh_tokens (token, client_id, resource, scope, expires_at)
-       VALUES (?, ?, ?, ?, ?)`,
+      `INSERT INTO refresh_tokens (token, client_id, resource, scope, expires_at, client_auth_method)
+       VALUES (?, ?, ?, ?, ?, ?)`,
     )
-    .run(rt.token, rt.clientId, rt.resource, rt.scope, rt.expiresAt);
+    .run(rt.token, rt.clientId, rt.resource, rt.scope, rt.expiresAt, rt.clientAuthMethod);
   return rt;
 }
 

@@ -8,17 +8,22 @@
  */
 
 import type { IncomingMessage, ServerResponse } from "http";
+import { verifyClientAssertion } from "./clientAssertion.js";
+import { resolveClient } from "./clientStore.js";
 import { verifyS256Challenge } from "./pkce.js";
 import {
   consumeCode,
   issueAccessToken,
   issueRefreshToken,
+  peekCodeAuthMethod,
+  peekRefreshAuthMethod,
   rotateRefreshToken,
 } from "./tokenStore.js";
 import {
   OAuthError,
   TokenAuthCodeRequestSchema,
   TokenRefreshRequestSchema,
+  type TokenEndpointAuthMethod,
 } from "./types.js";
 
 export interface TokenDeps {
@@ -26,8 +31,44 @@ export interface TokenDeps {
   issuerUrl: string;
   /** Canonical MCP audience URI (issuer + mcp endpoint path). */
   audience: string;
+  /** This server's own token endpoint URL — the only `aud` a client assertion may carry. */
+  tokenEndpoint: string;
   accessTtlSec: number;
   refreshTtlSec: number;
+}
+
+/**
+ * Enforce the client authentication that was bound to this grant at /authorize time.
+ *
+ * For "none" — every DCR client and every CIMD public client — this returns
+ * immediately and the exchange is byte-for-byte what it was before private_key_jwt
+ * existed: no client lookup, no network, no new failure mode. The CIMD document is
+ * resolved only on the private_key_jwt branch (cached in cimd.ts), which preserves
+ * the long-standing property that a refresh costs no round-trip.
+ */
+async function enforceClientAuth(
+  method: TokenEndpointAuthMethod,
+  form: { client_id: string; client_assertion?: string; client_assertion_type?: string },
+  deps: TokenDeps,
+): Promise<void> {
+  if (method === "none") return;
+  const client = await resolveClient(form.client_id);
+  if (client.tokenEndpointAuthMethod !== "private_key_jwt") {
+    // The client's published metadata no longer asks for private_key_jwt while a
+    // live grant still requires it. Honour the stricter of the two.
+    throw new OAuthError(
+      "invalid_client",
+      "grant requires private_key_jwt but the client no longer declares it",
+      401,
+    );
+  }
+  await verifyClientAssertion({
+    client,
+    assertion: form.client_assertion,
+    assertionType: form.client_assertion_type,
+    clientId: form.client_id,
+    tokenEndpoint: deps.tokenEndpoint,
+  });
 }
 
 interface TokenResponse {
@@ -53,6 +94,14 @@ async function handleAuthCode(form: Record<string, string>, deps: TokenDeps): Pr
   // is the authoritative proof that this client was approved at /authorize time.
   // For CIMD clients, re-fetching the metadata document on every /token call
   // would add an unnecessary network round-trip per refresh.
+  //
+  // Client authentication is checked first, and against a NON-destructive read of
+  // the code: consuming it before a failed assertion would burn the grant (and, on
+  // the client's retry, trip the reuse detector and revoke its refresh tokens).
+  const boundAuthMethod = peekCodeAuthMethod(r.code);
+  if (boundAuthMethod) {
+    await enforceClientAuth(boundAuthMethod, r, deps);
+  }
   const code = consumeCode(r.code);
   if (code.clientId !== r.client_id) {
     throw new OAuthError("invalid_grant", "code was issued to a different client", 400);
@@ -83,6 +132,7 @@ async function handleAuthCode(form: Record<string, string>, deps: TokenDeps): Pr
     resource: code.resource,
     scope: code.scope,
     ttlSec: deps.refreshTtlSec,
+    clientAuthMethod: code.clientAuthMethod,
   });
 
   return {
@@ -104,6 +154,14 @@ async function handleRefresh(form: Record<string, string>, deps: TokenDeps): Pro
     );
   }
   const r = parsed.data;
+
+  // Same ordering rule as the authorization_code grant: authenticate the client
+  // against a non-destructive read first, because rotateRefreshToken deletes the
+  // presented token and a failure afterwards would log the connector out for good.
+  const boundAuthMethod = peekRefreshAuthMethod(r.refresh_token);
+  if (boundAuthMethod) {
+    await enforceClientAuth(boundAuthMethod, r, deps);
+  }
 
   // refresh token → client binding is verified by rotateRefreshToken.
   const old = rotateRefreshToken(r.refresh_token, r.client_id);
@@ -130,6 +188,7 @@ async function handleRefresh(form: Record<string, string>, deps: TokenDeps): Pro
     resource: old.resource,
     scope,
     ttlSec: deps.refreshTtlSec,
+    clientAuthMethod: old.clientAuthMethod,
   });
 
   return {

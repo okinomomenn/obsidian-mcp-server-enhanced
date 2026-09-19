@@ -82,6 +82,28 @@ function resolveDbPath(): string {
   return configDbPath ?? process.env.MCP_OAUTH_DB_PATH ?? "";
 }
 
+/**
+ * Additive migrations applied after SCHEMA. Each is idempotent: `CREATE TABLE IF
+ * NOT EXISTS` above never alters an existing table, so a column added after a
+ * database already exists in production has to be bolted on here.
+ *
+ * client_auth_method (2026-09-18) records how the client authenticated itself when
+ * the grant was created, so /token can enforce private_key_jwt without re-fetching
+ * the CIMD document on every exchange. Existing rows — every DCR client and the
+ * CIMD public clients — default to 'none', which is exactly their behaviour before
+ * this column existed.
+ */
+function migrate(handle: DatabaseSync): void {
+  const addColumn = (table: string, column: string, ddl: string) => {
+    const cols = handle.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
+    if (!cols.some((c) => c.name === column)) {
+      handle.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
+    }
+  };
+  addColumn("codes", "client_auth_method", "client_auth_method TEXT NOT NULL DEFAULT 'none'");
+  addColumn("refresh_tokens", "client_auth_method", "client_auth_method TEXT NOT NULL DEFAULT 'none'");
+}
+
 function open(dbPath: string): DatabaseSync {
   // The DB deliberately lives outside the project tree in production
   // (D:\SYRINX-Data\...), so it is NOT routed through config's ensureDirectory,
@@ -93,6 +115,7 @@ function open(dbPath: string): DatabaseSync {
   handle.exec("PRAGMA journal_mode = WAL");
   handle.exec("PRAGMA foreign_keys = ON");
   handle.exec(SCHEMA);
+  migrate(handle);
   return handle;
 }
 

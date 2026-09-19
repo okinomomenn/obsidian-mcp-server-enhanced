@@ -105,6 +105,7 @@ export async function routeOAuth(
         jwtSecret: deps.jwtSecret,
         issuerUrl: deps.issuerUrl,
         audience: `${deps.issuerUrl.replace(/\/+$/, "")}${deps.mcpEndpointPath}`,
+        tokenEndpoint: `${deps.issuerUrl.replace(/\/+$/, "")}/token`,
         accessTtlSec: deps.accessTtlSec,
         refreshTtlSec: deps.refreshTtlSec,
       });

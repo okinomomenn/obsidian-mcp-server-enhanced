@@ -13,7 +13,12 @@
  * only, no redirects, body size cap, request timeout). See spec §6.
  */
 
-import { OAuthError, type ClientRegistration } from "./types.js";
+import {
+  OAuthError,
+  type ClientRegistration,
+  type JsonWebKeySet,
+  type TokenEndpointAuthMethod,
+} from "./types.js";
 
 /** A fetched & validated client metadata document, normalized to ClientRegistration. */
 // 2026-07-28: host egress observed at 4–19s TLS to the whole internet (not CIMD-host
@@ -76,6 +81,44 @@ export function isPrivateHostname(hostname: string): boolean {
 }
 
 /**
+ * Assert that `value` is an https URL this server is allowed to fetch. Shared by
+ * the CIMD document fetch and the private_key_jwt jwks_uri fetch so both sit
+ * behind exactly one SSRF policy. Returns the parsed URL; throws invalid_client.
+ */
+export function assertFetchableHttpsUrl(value: string, label: string): URL {
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new OAuthError("invalid_client", `${label} is not a valid URL: ${value}`, 400);
+  }
+  if (parsed.protocol !== "https:") {
+    throw new OAuthError("invalid_client", `${label} must use https:// (got ${parsed.protocol})`, 400);
+  }
+  if (isPrivateHostname(parsed.hostname)) {
+    throw new OAuthError("invalid_client", `${label} hostname ${parsed.hostname} is in a blocked range`, 400);
+  }
+  return parsed;
+}
+
+/** Shape-check an inline or fetched JWK Set. Throws invalid_client when unusable. */
+export function assertJwkSet(raw: unknown, label: string): JsonWebKeySet {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new OAuthError("invalid_client", `${label} must be a JSON object`, 400);
+  }
+  const keys = (raw as Record<string, unknown>).keys;
+  if (!Array.isArray(keys) || keys.length === 0) {
+    throw new OAuthError("invalid_client", `${label} must contain a non-empty "keys" array`, 400);
+  }
+  for (const k of keys) {
+    if (k === null || typeof k !== "object" || Array.isArray(k)) {
+      throw new OAuthError("invalid_client", `${label} entries must be JSON objects`, 400);
+    }
+  }
+  return { keys: keys as Record<string, unknown>[] };
+}
+
+/**
  * Parse & validate a CIMD document per draft-ietf-oauth-client-id-metadata-document-00 §3.
  * Throws OAuthError(invalid_client) on any failure. Pure (no I/O) so it can be tested directly.
  */
@@ -120,14 +163,55 @@ export function parseAndValidateCimdDocument(raw: unknown, expectedClientIdUrl: 
     redirectUris.push(uri);
   }
 
-  // token_endpoint_auth_method — v1 is public-client only.
+  // token_endpoint_auth_method. "none" (or absent) is the original public-client
+  // path and is untouched. "private_key_jwt" was added 2026-09-18 so that clients
+  // which refuse to downgrade to a public client (ChatGPT) can be admitted; it is
+  // only accepted when the document also publishes the key that signs assertions.
+  // Anything else is still rejected.
   const authMethod = doc.token_endpoint_auth_method;
-  if (authMethod !== undefined && authMethod !== "none") {
+  let tokenEndpointAuthMethod: TokenEndpointAuthMethod;
+  if (authMethod === undefined || authMethod === "none") {
+    tokenEndpointAuthMethod = "none";
+  } else if (authMethod === "private_key_jwt") {
+    tokenEndpointAuthMethod = "private_key_jwt";
+  } else {
     throw new OAuthError(
       "invalid_client",
-      `CIMD token_endpoint_auth_method must be "none" (public client); got "${String(authMethod)}"`,
+      `CIMD token_endpoint_auth_method must be "none" or "private_key_jwt"; got "${String(authMethod)}"`,
       400,
     );
+  }
+
+  // Key material — required for, and only read for, private_key_jwt.
+  let jwks: JsonWebKeySet | undefined;
+  let jwksUri: string | undefined;
+  let tokenEndpointAuthSigningAlg: string | undefined;
+  if (tokenEndpointAuthMethod === "private_key_jwt") {
+    const hasInline = doc.jwks !== undefined && doc.jwks !== null;
+    const hasUri = typeof doc.jwks_uri === "string" && doc.jwks_uri.length > 0;
+    if (hasInline && hasUri) {
+      throw new OAuthError(
+        "invalid_client",
+        `CIMD document must not set both "jwks" and "jwks_uri" (RFC 7591 §2)`,
+        400,
+      );
+    }
+    if (hasInline) {
+      jwks = assertJwkSet(doc.jwks, "CIMD jwks");
+    } else if (hasUri) {
+      // Validated eagerly so a hostile jwks_uri is rejected before it is ever fetched.
+      assertFetchableHttpsUrl(doc.jwks_uri as string, "CIMD jwks_uri");
+      jwksUri = doc.jwks_uri as string;
+    } else {
+      throw new OAuthError(
+        "invalid_client",
+        `CIMD token_endpoint_auth_method=private_key_jwt requires "jwks" or "jwks_uri"`,
+        400,
+      );
+    }
+    if (typeof doc.token_endpoint_auth_signing_alg === "string" && doc.token_endpoint_auth_signing_alg.length > 0) {
+      tokenEndpointAuthSigningAlg = doc.token_endpoint_auth_signing_alg;
+    }
   }
 
   const clientName = typeof doc.client_name === "string" && doc.client_name.length > 0
@@ -139,8 +223,11 @@ export function parseAndValidateCimdDocument(raw: unknown, expectedClientIdUrl: 
     clientName,
     redirectUris,
     createdAt: Date.now(),
-    tokenEndpointAuthMethod: "none",
+    tokenEndpointAuthMethod,
     source: "cimd",
+    ...(jwks ? { jwks } : {}),
+    ...(jwksUri ? { jwksUri } : {}),
+    ...(tokenEndpointAuthSigningAlg ? { tokenEndpointAuthSigningAlg } : {}),
   };
 }
 
@@ -165,20 +252,9 @@ export async function fetchCimdClient(clientIdUrl: string): Promise<ClientRegist
     return cached.client;
   }
 
-  let parsedUrl: URL;
-  try {
-    parsedUrl = new URL(clientIdUrl);
-  } catch {
-    throw new OAuthError("invalid_client", `client_id is not a valid URL: ${clientIdUrl}`, 400);
-  }
-  if (parsedUrl.protocol !== "https:") {
-    throw new OAuthError("invalid_client", `CIMD client_id URL must use https:// (got ${parsedUrl.protocol})`, 400);
-  }
+  const parsedUrl = assertFetchableHttpsUrl(clientIdUrl, "CIMD client_id URL");
   if (!parsedUrl.pathname || parsedUrl.pathname === "/") {
     throw new OAuthError("invalid_client", `CIMD client_id URL must have a path component`, 400);
-  }
-  if (isPrivateHostname(parsedUrl.hostname)) {
-    throw new OAuthError("invalid_client", `CIMD client_id URL hostname ${parsedUrl.hostname} is in a blocked range`, 400);
   }
 
   // Fetch + validate, retried on failure. Slow/flaky host egress (observed 4–19s
@@ -236,7 +312,15 @@ export async function fetchCimdClient(clientIdUrl: string): Promise<ClientRegist
   );
 }
 
-/** Test-only helper. */
+/** Test-only helpers. */
 export function _resetCimdCache(): void {
   cache.clear();
+}
+
+/**
+ * Seed the cache so tests can exercise the private_key_jwt path without reaching
+ * the network. Mirrors exactly what a successful fetch would have stored.
+ */
+export function _primeCimdCache(clientIdUrl: string, client: ClientRegistration, ttlMs = 300_000): void {
+  cache.set(clientIdUrl, { client, expiresAt: Date.now() + ttlMs });
 }
